@@ -1,12 +1,22 @@
 import { usePreferences } from "../preferences";
-import { Logo } from "../components";
+import { AnchorLink, CopyLinkButton, Logo } from "../components";
 import { LATEST, REPO } from "../site-meta";
 import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
 
 export default function FeaturesPage() {
   const { t } = usePreferences();
   const FEATURES = [
     {
+      id: "support-matrix",
+      tag: t("支持矩阵"),
+      title: t("平台支持矩阵"),
+      summary: t("一台设备对应一套能力边界：系统、CPU、TUN、双内核与自动更新，先看矩阵再决定用在哪台机器。"),
+      detail: [t("macOS 与 Windows 为正式支持；Linux x86_64 为社区实验版，iOS 仍在开发验证中。")],
+      matrix: true,
+    },
+    {
+      id: "nodes",
       tag: t("节点"),
       title: t("节点选择与测速"),
       summary: t("按地区、名称与延迟找到合适的节点，保留自动选择，也支持手动指定。"),
@@ -18,6 +28,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "subscription",
       tag: t("订阅"),
       title: t("订阅管理"),
       summary:
@@ -32,6 +43,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "sysproxy-guard",
       tag: t("守护"),
       title: t("系统代理守护"),
       summary:
@@ -44,6 +56,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "tun",
       tag: t("网络"),
       title: t("TUN 模式"),
       summary:
@@ -56,6 +69,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "diagnostics",
       tag: t("诊断"),
       title: t("网络诊断向导"),
       summary:
@@ -67,6 +81,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "js-override",
       tag: t("覆写"),
       title: t("JS 覆写"),
       summary:
@@ -79,6 +94,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "lightweight",
       tag: t("轻量"),
       title: t("轻量模式"),
       summary:
@@ -90,6 +106,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "observability",
       tag: t("观测"),
       title: t("实时观测"),
       summary:
@@ -104,6 +121,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "engines",
       tag: t("引擎"),
       title: t("双内核引擎"),
       summary:
@@ -116,6 +134,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "notifications",
       tag: t("通知"),
       title: t("重要结果，不被琐事淹没"),
       summary: t("通知集中呈现错误、需要处理的问题与后台任务进度；主题、语言等可直接感知的成功操作保持安静。"),
@@ -127,6 +146,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "snapshots",
       tag: t("恢复"),
       title: t("配置快照与恢复"),
       summary: t("保存前自动保留最近五份配置快照，可在界面查看时间、配置与覆写数量，选择需要恢复的版本。"),
@@ -137,6 +157,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "updates",
       tag: t("更新"),
       title: t("由你确认的应用更新"),
       summary: t("macOS / Windows 可在应用内检查、下载并安装更新；检查版本与下载是两个独立动作。"),
@@ -147,6 +168,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "preferences",
       tag: t("偏好"),
       title: t("外观与连接设置"),
       summary: t("界面支持浅色、深色、跟随系统及中英文；按使用场景调整端口与局域网连接。"),
@@ -157,6 +179,7 @@ export default function FeaturesPage() {
       ],
     },
     {
+      id: "linux",
       tag: "Linux",
       title: t("社区共建的 Linux 实验版"),
       summary: t("提供 x86_64 TAR.GZ；当前主要验证 CachyOS 与 niri / Wayland，逐步补齐桌面适配。"),
@@ -168,12 +191,51 @@ export default function FeaturesPage() {
     },
   ];
 
+  // 当前章节提示（#349）：滚动时高亮目录里的对应章节。
+  const [active, setActive] = useState<string | null>(null);
+  const ids = FEATURES.map((f) => f.id).join(",");
+  useEffect(() => {
+    const sections = ids
+      .split(",")
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => Boolean(el));
+    if (!sections.length) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (visible) setActive(visible.target.id);
+      },
+      { rootMargin: "-104px 0px -55% 0px" },
+    );
+    sections.forEach((section) => observer.observe(section));
+    return () => observer.disconnect();
+  }, [ids]);
 
   return <div className="shell detail-page">
     <header className="page-heading"><h1>{t("功能详解")}</h1><p>{t("从订阅与节点，到接管与观测。了解每一步连接由什么组成。")}</p></header>
-    <nav className="section-nav" aria-label={t("功能目录")}>{FEATURES.map((f,i) => <button key={f.tag} onClick={() => document.getElementById(`feature-${i+1}`)?.scrollIntoView({ block: "start" })}>{f.tag}</button>)}</nav>
-    <div className="detail-list">{FEATURES.map((f,i) => <section className="detail-section" id={`feature-${i+1}`} key={f.title}>
-      <div><h2>{f.title}</h2><p>{f.summary}</p></div><ul>{f.detail.map(d => <li key={d}>{d}</li>)}</ul>
+    <nav className="section-nav" aria-label={t("功能目录")}>{FEATURES.map((f) => <AnchorLink key={f.id} to={`/features#${f.id}`} className={active === f.id ? "section-link active" : "section-link"}>{f.tag}</AnchorLink>)}</nav>
+    <div className="detail-list">{FEATURES.map((f) => <section className="detail-section" id={f.id} key={f.title}>
+      <div><h2>{f.title}<CopyLinkButton to={`/features#${f.id}`} /></h2><p>{f.summary}</p></div>
+      {f.matrix ? (
+        <div className="matrix-scroll">
+          <table>
+            <thead><tr><th scope="col">{t("能力")}</th><th scope="col">macOS (Apple Silicon)</th><th scope="col">Windows x64</th><th scope="col">Linux x86_64（实验）</th><th scope="col">iOS</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">{t("安装包")}</th><td>DMG · {t("签名与公证")}</td><td>EXE · {t("未签名")}</td><td>TAR.GZ · {t("社区归档")}</td><td>{t("暂未公开分发")}</td></tr>
+              <tr><th scope="row">{t("系统代理")}</th><td>✓ {t("自动快照与还原")}</td><td>✓ {t("自动快照与还原")}</td><td>✗ {t("手动配置")}</td><td>—</td></tr>
+              <tr><th scope="row">{t("TUN 模式")}</th><td>✓ {t("管理员授权")}</td><td>✓ {t("系统服务承载")}</td><td>{t("实验性 systemd / polkit 服务")}</td><td>—</td></tr>
+              <tr><th scope="row">{t("双内核切换")}</th><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
+              <tr><th scope="row">{t("应用内自动更新")}</th><td>✓</td><td>✓</td><td>✗ {t("手动下载")}</td><td>—</td></tr>
+              <tr><th scope="row">{t("当前状态")}</th><td>{t("正式支持")}</td><td>{t("正式支持")}</td><td>{t("社区实验")}</td><td>{t("开发验证中")}</td></tr>
+            </tbody>
+          </table>
+          <p className="matrix-note">{t("更新内容以各平台发布说明为准；Linux 的验收边界与安装步骤见")}<Link className="text-link" to="/guide#linux">{t("Linux 支持范围")}</Link>{t("。")}</p>
+        </div>
+      ) : (
+        <ul>{f.detail.map((d) => <li key={d}>{d}</li>)}</ul>
+      )}
     </section>)}</div>
     <div className="page-next"><div><h2>{t("还有更多进阶玩法")}</h2><p>{t("JS 覆写、双引擎切换、深链接导入，继续探索。")}</p></div><Link className="text-link" to="/guide">{t("查看进阶指南 →")}</Link></div>
     <div className="page-meta"><Logo size={20} /><a href={`${REPO}/issues`} target="_blank" rel="noopener noreferrer">{t("功能建议欢迎提 Issue ↗")}</a><a href={LATEST} target="_blank" rel="noopener noreferrer">{t("下载体验 ↗")}</a></div>
