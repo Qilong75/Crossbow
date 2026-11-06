@@ -2565,6 +2565,8 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
 
     const INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
     const MAX_CONSECUTIVE_FAILURES: u8 = 3;
+    const MAX_WEDGE_RESTARTS: u8 = 2;
+    const WEDGE_COOLDOWN_SECS: u64 = 90;
     let handle = app.clone();
     std::thread::spawn(move || {
         let mut failures = 0u8;
@@ -2573,6 +2575,9 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
         let mut reestablish_cooldown_until = std::time::Instant::now();
         let mut reported_giveup = false;
         let mut reported_disable_failure = false;
+        // TUN 栈楔死（#350）：重启内核预算与冷却。冷却期内跳过探测等新内核稳定。
+        let mut wedge_restarts = 0u8;
+        let mut wedge_cooldown_until = std::time::Instant::now();
         loop {
             let cycle_started = std::time::Instant::now();
             if let Some(state) = handle.try_state::<AppState>() {
@@ -2590,6 +2595,13 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                     // 持续即关开重建立（2 分钟冷却、连续 3 次后停止自动恢复
                     // 并一次性通知），重建立周期跳过连通性探测。
                     let mut skip_probe = false;
+                    let wedge_cooling = std::time::Instant::now() < wedge_cooldown_until;
+                    if wedge_cooling {
+                        // 重启内核后的稳定期：跳过探测与漂移检测，失败计数清零
+                        skip_probe = true;
+                        failures = 0;
+                        drift_strikes = 0;
+                    }
                     let cooling = std::time::Instant::now() < reestablish_cooldown_until;
                     #[cfg(target_os = "macos")]
                     let drifted = !cooling && crate::tun::takeover_drift();
@@ -2700,7 +2712,34 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                             if failures >= MAX_CONSECUTIVE_FAILURES {
                                 let still_enabled =
                                     state.store.lock().unwrap().data().engine.tun_enable;
-                                if still_enabled {
+                                if still_enabled && wedge_restarts < MAX_WEDGE_RESTARTS {
+                                    // 重启内核优先（#350）：SIGTERM 让 mihomo 走退出钩子
+                                    // 恢复路由，崩溃自动重启链路拉起新内核重建 TUN——
+                                    // 这才真正修复 gvisor 栈僵死。直接关 TUN 会让国外
+                                    // 流量直连被墙（系统代理未开时表现为整机断网）。
+                                    wedge_restarts = wedge_restarts.saturating_add(1);
+                                    failures = 0;
+                                    reported_disable_failure = false;
+                                    wedge_cooldown_until =
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(90);
+                                    let mut notice = notifications::Notice::new(
+                                        notifications::Kind::Warning,
+                                        "tun.wedgeRestart",
+                                        "tun-health",
+                                    );
+                                    notice.duration = Some(0);
+                                    notice.actions = vec![notifications::Action::Diagnostics];
+                                    notifications::publish(&handle, notice);
+                                    #[cfg(unix)]
+                                    let restarted = state.core().signal_graceful_restart();
+                                    #[cfg(not(unix))]
+                                    let restarted = false;
+                                    eprintln!(
+                                        "tun health: restarting core to recover wedged TUN (attempt {wedge_restarts}/{MAX_WEDGE_RESTARTS}, signaled={restarted})"
+                                    );
+                                    skip_probe = true;
+                                } else if still_enabled {
                                     match disable_tun_if_enabled(&state) {
                                         Ok(()) => {
                                             failures = 0;
