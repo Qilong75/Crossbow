@@ -7,7 +7,7 @@ pub(crate) enum Entry {
         enabled: bool,
         checked: Option<bool>,
     },
-    Submenu(String, Vec<Entry>),
+    Submenu(#[cfg(target_os = "macos")] &'static str, String, Vec<Entry>),
     Separator,
 }
 

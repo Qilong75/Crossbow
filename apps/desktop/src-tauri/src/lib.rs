@@ -40,6 +40,8 @@ mod tray_speed;
 mod tray_state;
 mod tray_menu;
 #[cfg(target_os = "macos")]
+mod tray_panel;
+#[cfg(target_os = "macos")]
 mod tun;
 #[cfg(windows)]
 mod tun_windows;
@@ -3133,6 +3135,8 @@ fn tray_menu_entries(
         )
     );
     let mode_menu = Entry::Submenu(
+        #[cfg(target_os = "macos")]
+        "mode",
         mode_label,
         vec![
             Entry::check("mode-direct", tr(&lang, "直连", "Direct"), mode == "direct"),
@@ -3149,6 +3153,8 @@ fn tray_menu_entries(
         )
     };
     let profile_menu = Entry::Submenu(
+        #[cfg(target_os = "macos")]
+        "profiles",
         tr(&lang, "配置", "Profiles"),
         profiles.iter().map(|profile| {
             Entry::check(
@@ -3178,7 +3184,7 @@ fn tray_menu_entries(
             nodes.extend(data.rows.iter().map(|row| {
                 Entry::check(format!("node-{}", row.name), row.label.clone(), row.selected)
             }));
-            entries.push(Entry::Submenu(tray_speed::format_flag_spacing(&data.title), nodes));
+            entries.push(Entry::Submenu("nodes", tray_speed::format_flag_spacing(&data.title), nodes));
         }
     }
     entries.extend([profile_menu, Entry::Separator]);

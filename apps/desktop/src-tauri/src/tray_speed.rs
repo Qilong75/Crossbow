@@ -6,23 +6,27 @@
 //! 每秒抖动。仅 macOS，其余平台为空操作。
 
 use crate::tray_menu::Entry;
+use crate::tray_panel::{Selection, TrayPanel};
 use crate::tray_state::TrayNodeRow;
 use std::cell::{Cell, RefCell};
 use tauri::{AppHandle, Manager};
 
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly};
+use objc2::{
+    define_class, msg_send, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly, Message,
+};
 use objc2_app_kit::NSAppearanceCustomization as _;
 use objc2_app_kit::NSAttributedStringNSStringDrawing as _;
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSBaselineOffsetAttributeName,
-    NSCellImagePosition, NSColor, NSControlSize, NSEvent, NSFont, NSFontAttributeName,
-    NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSImageView,
-    NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSProgressIndicator, NSProgressIndicatorStyle, NSStatusBar,
-    NSStatusItem, NSTextAlignment, NSTextField, NSView,
+    NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSBaselineOffsetAttributeName, NSButton,
+    NSCellImagePosition, NSColor, NSControlSize, NSEvent, NSEventMask, NSEventType, NSFont,
+    NSFontAttributeName, NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName,
+    NSImage, NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSProgressIndicator,
+    NSProgressIndicatorStyle, NSStatusBar, NSStatusItem, NSTextAlignment, NSTextField, NSView,
 };
 use objc2_foundation::{
     NSAttributedString, NSAttributedStringKey, NSData, NSDictionary, NSNumber, NSObject,
@@ -776,6 +780,10 @@ struct StatusMenuState {
     tracking: Cell<bool>,
     needs_rebuild: Cell<bool>,
     speed: RefCell<String>,
+    panel: RefCell<Option<TrayPanel>>,
+    session: RefCell<Option<Retained<AnyObject>>>,
+    panel_open: Cell<bool>,
+    mouse_monitors: RefCell<Vec<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -837,6 +845,60 @@ define_class!(
     }
 
     impl StatusMenu {
+        #[unsafe(method(statusItem:didBeginExpandedInterfaceSession:))]
+        fn begin_expanded_interface(&self, _item: &NSStatusItem, session: &AnyObject) {
+            self.ivars().session.replace(Some(session.retain()));
+            self.open_panel();
+        }
+
+        #[unsafe(method(statusItemDidEndExpandedInterfaceSession:animated:))]
+        fn end_expanded_interface(&self, _item: &NSStatusItem, _animated: objc2::runtime::Bool) {
+            self.ivars().session.take();
+            self.hide_panel();
+        }
+
+        #[unsafe(method(trayRightClick:))]
+        fn tray_right_click(&self, _button: &NSButton) {
+            let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
+            if app.currentEvent().is_some_and(|event| event.r#type() == NSEventType::RightMouseUp) {
+                if self.ivars().panel_open.get() {
+                    self.cancel_panel();
+                } else {
+                    self.open_panel();
+                }
+            }
+        }
+
+        #[unsafe(method(trayPanelAction:))]
+        fn panel_action(&self, button: &NSButton) {
+            let action = self.ivars().panel.borrow().as_ref()
+                .and_then(|panel| panel.choose(button.tag()));
+            match action {
+                Some(Selection::Submenu(page)) => {
+                    if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
+                        panel.set_page(Some(page));
+                    }
+                    self.render_panel();
+                    if page == "nodes" {
+                        crate::refresh_tray_nodes(&self.ivars().handle, true);
+                    }
+                }
+                Some(Selection::Back) => {
+                    if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
+                        panel.set_page(None);
+                    }
+                    self.render_panel();
+                }
+                Some(Selection::Action(id)) => {
+                    if id != "tray-delay-test" && !id.starts_with("node-") {
+                        self.cancel_panel();
+                    }
+                    crate::handle_menu(&self.ivars().handle, &id);
+                }
+                None => {}
+            }
+        }
+
         #[unsafe(method(performMenuAction:))]
         fn perform_menu_action(&self, item: &NSMenuItem) {
             if item.isEnabled() {
@@ -849,6 +911,98 @@ define_class!(
 );
 
 impl StatusMenu {
+    fn open_panel(&self) {
+        if self.ivars().panel_open.replace(true) {
+            return;
+        }
+        if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
+            panel.begin(MainThreadMarker::from(self));
+        }
+        self.render_panel();
+        // A local monitor sees Crossbow windows; a global mouse monitor sees
+        // the full-screen app underneath. Neither consumes the user's click.
+        let mouse =
+            NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
+        let global = RcBlock::new(|_event: std::ptr::NonNull<NSEvent>| {
+            with_status_menu(|tray| tray.dismiss_if_outside());
+        });
+        let local = RcBlock::new(|event: std::ptr::NonNull<NSEvent>| {
+            with_status_menu(|tray| {
+                // The pointer is valid for the duration of the AppKit callback.
+                let event = unsafe { event.as_ref() };
+                if event.r#type() == NSEventType::KeyDown {
+                    if event.keyCode() == 53 && tray.ivars().panel_open.get() {
+                        tray.cancel_panel();
+                        return std::ptr::null_mut();
+                    }
+                } else {
+                    tray.dismiss_if_outside();
+                }
+                std::ptr::from_ref(event).cast_mut()
+            })
+            .unwrap_or(event.as_ptr())
+        });
+        let monitors = [
+            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mouse, &global),
+            unsafe {
+                NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                    mouse | NSEventMask::KeyDown,
+                    &local,
+                )
+            },
+        ];
+        self.ivars()
+            .mouse_monitors
+            .replace(monitors.into_iter().flatten().collect());
+    }
+
+    fn dismiss_if_outside(&self) {
+        let outside = self.ivars().panel_open.get()
+            && self
+                .ivars()
+                .panel
+                .borrow()
+                .as_ref()
+                .is_some_and(|panel| !panel.contains_pointer());
+        if outside {
+            self.cancel_panel();
+        }
+    }
+
+    fn hide_panel(&self) {
+        if !self.ivars().panel_open.replace(false) {
+            return;
+        }
+        for monitor in self.ivars().mouse_monitors.take() {
+            // The tokens were returned by NSEvent's monitor registration.
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
+        if let Some(panel) = self.ivars().panel.borrow().as_ref() {
+            panel.hide();
+        }
+    }
+
+    fn cancel_panel(&self) {
+        let session = self.ivars().session.take();
+        self.hide_panel();
+        if let Some(session) = session {
+            // The session is received from NSStatusItem on macOS 27.
+            let _: () = unsafe { msg_send![&*session, cancel] };
+        }
+    }
+
+    fn render_panel(&self) {
+        if !self.ivars().panel_open.get() {
+            return;
+        }
+        let app = &self.ivars().handle;
+        let data = crate::tray_menu_data(&app.state::<crate::AppState>());
+        let entries = crate::tray_menu_entries(app, &data);
+        if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
+            panel.render(&entries, &data.rows, self, MainThreadMarker::from(self));
+        }
+    }
+
     fn is_root(&self, menu: &NSMenu) -> bool {
         self.ivars()
             .item
@@ -857,6 +1011,10 @@ impl StatusMenu {
     }
 
     fn rebuild(&self) {
+        if self.ivars().panel.borrow().is_some() {
+            self.render_panel();
+            return;
+        }
         if self.ivars().tracking.get() {
             self.ivars().needs_rebuild.set(true);
             return;
@@ -909,7 +1067,7 @@ fn build_native_menu(title: &str, entries: &[Entry], target: &StatusMenu) -> Ret
     for entry in entries {
         let item = match entry {
             Entry::Separator => NSMenuItem::separatorItem(mtm),
-            Entry::Submenu(title, children) => {
+            Entry::Submenu(_, title, children) => {
                 let item = NSMenuItem::new(mtm);
                 item.setTitle(&NSString::from_str(title));
                 item.setSubmenu(Some(&build_native_menu(title, children, target)));
@@ -968,14 +1126,30 @@ pub fn install(handle: &AppHandle) -> std::io::Result<()> {
     button.setImage(Some(&image));
     button.setImagePosition(NSCellImagePosition::ImageLeft);
     button.setToolTip(Some(&NSString::from_str("Crossbow")));
+    let uses_expanded_interface =
+        item.respondsToSelector(objc2::sel!(setExpandedInterfaceDelegate:));
     let tray = StatusMenu::alloc(mtm).set_ivars(StatusMenuState {
         handle: handle.clone(),
         item,
         tracking: Cell::new(false),
         needs_rebuild: Cell::new(false),
         speed: RefCell::new(String::new()),
+        panel: RefCell::new(uses_expanded_interface.then(|| TrayPanel::new(mtm))),
+        session: RefCell::new(None),
+        panel_open: Cell::new(false),
+        mouse_monitors: RefCell::new(Vec::new()),
     });
     let tray: Retained<StatusMenu> = unsafe { msg_send![super(tray), init] };
+    if uses_expanded_interface {
+        // objc2's AppKit bindings predate this selector. Only send it when
+        // the running AppKit supports it.
+        let _: () = unsafe { msg_send![&*tray.ivars().item, setExpandedInterfaceDelegate: &*tray] };
+        unsafe {
+            button.setTarget(Some(&tray));
+            button.setAction(Some(objc2::sel!(trayRightClick:)));
+        }
+        button.sendActionOn(NSEventMask::RightMouseUp);
+    }
     STATUS_MENU.with(|slot| {
         if let Err(tray) = slot.set(tray) {
             bar.removeStatusItem(&tray.ivars().item);
@@ -1065,6 +1239,10 @@ fn update_status_node_rows(
     rows: &[TrayNodeRow],
     testing: bool,
 ) -> bool {
+    if tray.ivars().panel.borrow().is_some() {
+        tray.render_panel();
+        return true;
+    }
     tray.ivars()
         .item
         .menu(MainThreadMarker::from(tray))
