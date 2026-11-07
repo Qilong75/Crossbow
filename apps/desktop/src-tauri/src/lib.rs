@@ -3654,7 +3654,60 @@ fn is_elevated() -> bool {
     unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
 }
 
+/// panic 落盘（#352）：GUI 进程 stderr 不可见，启动路径的 panic（如
+/// 昨日 did_finish_launching SIGABRT ×3）过去完全无消息留痕。在
+/// Builder 之前注册——覆盖 setup 阶段的所有 panic；写数据目录
+/// panic.log（时间 + 线程 + 消息 + 位置），写失败静默放弃（钩子里
+/// 不能再 panic）。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".into()
+        };
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>").to_string();
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "[{ms}] thread '{thread_name}' panicked at {location}: {payload}\n"
+        );
+        // 与 data_dir 同目标但不依赖 AppState：macOS ~/Library/Application
+        // Support；Windows %APPDATA%。写失败静默放弃（钩子内不能再 panic）。
+        #[cfg(target_os = "macos")]
+        let dir = std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h))
+            .map(|h| h.join("Library/Application Support/com.richard.crossbow"));
+        #[cfg(target_os = "windows")]
+        let dir = std::env::var_os("APPDATA")
+            .map(|h| std::path::PathBuf::from(h))
+            .map(|h| h.join("com.richard.crossbow"));
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let dir: Option<std::path::PathBuf> = None;
+        if let Some(dir) = dir {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"))
+                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        }
+        default_hook(info);
+    }));
+}
+
 pub fn run() {
+    install_panic_hook();
     #[cfg(target_os = "windows")]
     deelevate_if_needed();
     tauri::Builder::default()
