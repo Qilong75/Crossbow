@@ -76,7 +76,7 @@ export default function App() {
         <Link to="/" onClick={() => window.scrollTo({ top: 0, behavior: "instant" })} className="brand"><Logo size={28} />Crossbow</Link>
         <div className="footer-links"><Link to="/features">{t("功能详解")}</Link><Link to="/guide">{t("进阶指南")}</Link><a href={RELEASES} target="_blank" rel="noopener noreferrer">{t("历史版本 ↗")}</a><a href={`${REPO}/issues`} target="_blank" rel="noopener noreferrer">{t("反馈问题 ↗")}</a></div>
       </div>
-      <div className="shell footer-bottom"><span>© 2026 Crossbow Contributors</span><span><a href={`${REPO}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">{t("GPL-3.0 开源")}</a> {t("· 自备节点或配置")}</span></div>
+      <div className="shell footer-bottom"><span>© 2026 Crossbow Contributors</span><span><a href={`${REPO}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">{t("MIT 开源")}</a> {t("· 自备节点或配置")}</span></div>
     </footer>
   </>;
 }

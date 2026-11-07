@@ -73,5 +73,5 @@ docs                  设计、路线图与恢复说明
 
 ## 许可
 
-项目声明采用 [GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html)。mihomo 与 sing-box
-作为独立内核进程运行，分别遵循其自身许可。
+项目采用 [MIT](https://opensource.org/licenses/MIT) 许可证。mihomo 与 sing-box
+作为独立内核进程运行（sidecar 外部进程调用，不链接），分别遵循其自身许可。

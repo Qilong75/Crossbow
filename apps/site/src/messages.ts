@@ -15,7 +15,7 @@ export const english = {
   "返回首页 →": "Back to home →",
   "历史版本 ↗": "Past releases ↗",
   "反馈问题 ↗": "Report an issue ↗",
-  "GPL-3.0 开源": "Open source · GPL-3.0",
+  "MIT 开源": "Open source · MIT",
   "· 自备节点或配置": "· Bring your own nodes or configuration",
   "Apple Silicon · M 系列芯片": "Apple Silicon · M-series chips",
   "下载 DMG": "Download DMG",
