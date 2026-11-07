@@ -809,7 +809,13 @@ impl CoreManager {
             let pid = child.id();
             let result = signal_pid(pid, libc::SIGTERM);
             if result.is_ok() {
-                inner.tun_health_restart = Some((pid, Instant::now()));
+                // tun_health_restart 仅 macOS 存在（gvisor 栈僵死节流）；
+                // Linux 上信号天然不发（服务承载内核无 child 句柄）。
+                #[cfg(target_os = "macos")]
+                {
+                    inner.tun_health_restart = Some((pid, Instant::now()));
+                }
+                let _ = pid;
             }
             result
         };
