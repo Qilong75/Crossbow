@@ -21,6 +21,7 @@ mod macos_icon;
 mod coexist;
 mod config_transition;
 mod core_manager;
+mod core_restart;
 mod diagnose;
 mod site_tests;
 #[cfg(windows)]
@@ -2569,6 +2570,8 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
 
     const INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
     const MAX_CONSECUTIVE_FAILURES: u8 = 3;
+    const MAX_WEDGE_RESTARTS: u8 = 2;
+    const WEDGE_COOLDOWN_SECS: u64 = 90;
     let handle = app.clone();
     std::thread::spawn(move || {
         let mut failures = 0u8;
@@ -2577,12 +2580,49 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
         let mut reestablish_cooldown_until = std::time::Instant::now();
         let mut reported_giveup = false;
         let mut reported_disable_failure = false;
+        // TUN 栈楔死（#350）：重启内核预算与冷却。冷却期内跳过探测等新内核稳定。
+        let mut wedge_restarts = 0u8;
+        let mut wedge_cooldown_until = std::time::Instant::now();
+        // 系统代理模式核心死亡看门狗（#352/#356）
+        let mut sysproxy_dead_ticks = 0u8;
         loop {
             let cycle_started = std::time::Instant::now();
             if let Some(state) = handle.try_state::<AppState>() {
                 let tun_enabled = state.store.lock().unwrap().data().engine.tun_enable;
                 let core_status = state.core().status();
                 if !tun_enabled || core_status == CoreStatus::Starting {
+                    // 系统代理模式（无 TUN）的兜底：Crossbow 开着系统代理而内核
+                    // 死亡 → 代理指向死端口，走代理的应用整机断网。连续 3 个周期
+                    // （15s）核心未恢复 → 关闭系统代理（还原快照），直连流量立即
+                    // 恢复，避免黑洞。仅清 Crossbow 自己开的代理（status() 读
+                    // 内存状态，不碰其他客户端设置的代理）。
+                    let sysproxy_mode = !tun_enabled
+                        && state.sysproxy.status().enabled
+                        && matches!(core_status, CoreStatus::Crashed(_) | CoreStatus::Stopped);
+                    if sysproxy_mode {
+                        sysproxy_dead_ticks = sysproxy_dead_ticks.saturating_add(1);
+                        if sysproxy_dead_ticks >= MAX_CONSECUTIVE_FAILURES {
+                            sysproxy_dead_ticks = 0;
+                            match state.sysproxy.disable() {
+                                Ok(()) => {
+                                    let _ = handle.emit("sysproxy://status", state.sysproxy.status());
+                                    refresh_tray(&handle);
+                                    let mut notice = notifications::Notice::new(
+                                        notifications::Kind::Warning,
+                                        "sysproxy.coreDead",
+                                        "tun-health",
+                                    );
+                                    notice.duration = Some(0);
+                                    notifications::publish(&handle, notice);
+                                }
+                                Err(error) => {
+                                    eprintln!("sysproxy stale-off failed: {error}");
+                                }
+                            }
+                        }
+                    } else {
+                        sysproxy_dead_ticks = 0;
+                    }
                     failures = 0;
                     drift_strikes = 0;
                     reestablish_count = 0;
@@ -2594,6 +2634,13 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                     // 持续即关开重建立（2 分钟冷却、连续 3 次后停止自动恢复
                     // 并一次性通知），重建立周期跳过连通性探测。
                     let mut skip_probe = false;
+                    let wedge_cooling = std::time::Instant::now() < wedge_cooldown_until;
+                    if wedge_cooling {
+                        // 重启内核后的稳定期：跳过探测与漂移检测，失败计数清零
+                        skip_probe = true;
+                        failures = 0;
+                        drift_strikes = 0;
+                    }
                     let cooling = std::time::Instant::now() < reestablish_cooldown_until;
                     #[cfg(target_os = "macos")]
                     let drifted = !cooling && crate::tun::takeover_drift();
@@ -2704,7 +2751,34 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                             if failures >= MAX_CONSECUTIVE_FAILURES {
                                 let still_enabled =
                                     state.store.lock().unwrap().data().engine.tun_enable;
-                                if still_enabled {
+                                if still_enabled && wedge_restarts < MAX_WEDGE_RESTARTS {
+                                    // 重启内核优先（#350）：SIGTERM 让 mihomo 走退出钩子
+                                    // 恢复路由，崩溃自动重启链路拉起新内核重建 TUN——
+                                    // 这才真正修复 gvisor 栈僵死。直接关 TUN 会让国外
+                                    // 流量直连被墙（系统代理未开时表现为整机断网）。
+                                    wedge_restarts = wedge_restarts.saturating_add(1);
+                                    failures = 0;
+                                    reported_disable_failure = false;
+                                    wedge_cooldown_until =
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(90);
+                                    let mut notice = notifications::Notice::new(
+                                        notifications::Kind::Warning,
+                                        "tun.wedgeRestart",
+                                        "tun-health",
+                                    );
+                                    notice.duration = Some(0);
+                                    notice.actions = vec![notifications::Action::Diagnostics];
+                                    notifications::publish(&handle, notice);
+                                    #[cfg(unix)]
+                                    let restarted = state.core().signal_graceful_restart();
+                                    #[cfg(not(unix))]
+                                    let restarted = false;
+                                    eprintln!(
+                                        "tun health: restarting core to recover wedged TUN (attempt {wedge_restarts}/{MAX_WEDGE_RESTARTS}, signaled={restarted})"
+                                    );
+                                    skip_probe = true;
+                                } else if still_enabled {
                                     match disable_tun_if_enabled(&state) {
                                         Ok(()) => {
                                             failures = 0;
@@ -3568,7 +3642,129 @@ fn is_elevated() -> bool {
     unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
 }
 
+/// panic 落盘（#352）：GUI 进程 stderr 不可见，启动路径的 panic（如
+/// 昨日 did_finish_launching SIGABRT ×3）过去完全无消息留痕。在
+/// Builder 之前注册——覆盖 setup 阶段的所有 panic；写数据目录
+/// panic.log（时间 + 线程 + 消息 + 位置），写失败静默放弃（钩子里
+/// 不能再 panic）。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".into()
+        };
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>").to_string();
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "[{ms}] thread '{thread_name}' panicked at {location}: {payload}\n"
+        );
+        // 与 data_dir 同目标但不依赖 AppState：macOS ~/Library/Application
+        // Support；Windows %APPDATA%。写失败静默放弃（钩子内不能再 panic）。
+        #[cfg(target_os = "macos")]
+        let dir = std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h))
+            .map(|h| h.join("Library/Application Support/com.richard.crossbow"));
+        #[cfg(target_os = "windows")]
+        let dir = std::env::var_os("APPDATA")
+            .map(|h| std::path::PathBuf::from(h))
+            .map(|h| h.join("com.richard.crossbow"));
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let dir: Option<std::path::PathBuf> = None;
+        if let Some(dir) = dir {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"))
+                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        }
+        default_hook(info);
+    }));
+}
+
+/// 启动最前部的残留系统代理自愈：上一实例崩溃（如 did_finish_launching
+/// panic，早于 setup 内的 recover_stale）会把系统代理留在死端口上，走代理
+/// 的应用整机断网。journal 记录了 Crossbow 曾开启代理且该端口现在无监听
+/// → 还原系统代理（按快照）。在 Builder 之前执行，任何后续 panic 都不再
+/// 影响网络可用性。端口有监听（内核被收养/别的客户端占用同端口）则不动。
+#[cfg(any(target_os = "macos", windows))]
+fn clear_stale_system_proxy_early() {
+    let dir = data_dir_for_early_hooks();
+    let journal = dir.join("sysproxy-journal.json");
+    let Ok(raw) = std::fs::read_to_string(&journal) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let port = value.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
+    if !stale_proxy_should_clear(Some(port), port_has_listener(port)) {
+        return;
+    }
+    eprintln!(
+        "stale system proxy: journal port {port} has no listener; restoring settings"
+    );
+    #[cfg(target_os = "macos")]
+    let backend = sysproxy::NetworkSetup;
+    #[cfg(windows)]
+    let backend = sysproxy::WinInet;
+    let manager = sysproxy::SysProxyManager::new(backend, journal);
+    if let Err(error) = manager.disable() {
+        eprintln!("stale system proxy restore failed: {error}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn clear_stale_system_proxy_early() {}
+
+/// 自愈判定（纯函数便于测试）：journal 记录了非零端口且该端口无监听。
+fn stale_proxy_should_clear(journal_port: Option<u16>, port_listening: bool) -> bool {
+    journal_port.is_some_and(|p| p > 0) && !port_listening
+}
+
+fn port_has_listener(port: u16) -> bool {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+    TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_millis(300),
+    )
+    .is_ok()
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn data_dir_for_early_hooks() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join("Library/Application Support/com.richard.crossbow"))
+            .expect("HOME unset; cannot locate data dir")
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join("com.richard.crossbow"))
+            .expect("APPDATA unset; cannot locate data dir")
+    }
+}
+
 pub fn run() {
+    // The tray helper only hosts AppKit. Startup diagnostics and proxy
+    // recovery belong to the desktop process that owns the app state.
     #[cfg(target_os = "macos")]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(tray_helper::ARG)) {
         if let Err(error) = tray_helper::run() {
@@ -3577,6 +3773,8 @@ pub fn run() {
         }
         return;
     }
+    install_panic_hook();
+    clear_stale_system_proxy_early();
     #[cfg(target_os = "windows")]
     deelevate_if_needed();
     tauri::Builder::default()
@@ -3951,6 +4149,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_proxy_clear_truth_table() {
+        // journal 记录了端口且无监听 → 清理
+        assert!(stale_proxy_should_clear(Some(7898), false));
+        // 端口有监听（内核被收养/其他客户端占用）→ 不动
+        assert!(!stale_proxy_should_clear(Some(7898), true));
+        // journal 无记录（port 0 / 文件缺失）→ 不动
+        assert!(!stale_proxy_should_clear(Some(0), false));
+        assert!(!stale_proxy_should_clear(None, false));
+    }
 
     #[test]
     fn failed_save_restores_memory_and_preserves_previous_disk_state() {

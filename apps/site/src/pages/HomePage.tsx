@@ -86,7 +86,7 @@ function Steps() {
       {/* taste-skill-ignore: retain user-requested three installation steps. */}<article className="step-card"><span className="step-number">02</span><h3>{t("导入订阅")}</h3><p>{t("粘贴订阅链接，或把 .yaml 配置文件拖进窗口。设置自动更新间隔，查看流量与到期信息。")}</p></article>
       {/* taste-skill-ignore: retain user-requested three installation steps. */}<article className="step-card"><span className="step-number">03</span><h3>{t("一键开启")}</h3><p>{t("选择节点，macOS / Windows 在概览开启系统代理；Linux 需手动设置应用代理。TUN 按平台完成授权或服务安装后开启。")}</p></article>
     </div>
-    <Link className="text-link section-more" to="/guide">{t("继续阅读进阶指南 →")}</Link>
+    <Link className="text-link section-more" to="/guide#quick-start">{t("按步骤快速开始 →")}</Link>
   </section>;
 }
 function Faq() {
@@ -106,7 +106,7 @@ function Faq() {
     },
     {
       q: t("支持 Linux 和 iOS 吗？"),
-      a: <>{t("已提供 Linux x86_64 社区实验版归档，当前主要在 CachyOS + niri / Wayland 验证。需手动配置应用代理，TUN 需 systemd / polkit 服务；尚无 AppImage / DEB 或应用内自动更新。")}<Link to="/guide#linux">{t("查看 Linux 支持范围")}</Link>{t("。iOS 正在真机开发验证中，尚未公开分发。")}</>,
+      a: <>{t("已提供 Linux x86_64 社区实验版归档，当前主要在 CachyOS + niri / Wayland 验证。需手动配置应用代理，TUN 需 systemd / polkit 服务；尚无 AppImage / DEB 或应用内自动更新。")}<Link to="/features#support-matrix">{t("查看平台支持矩阵")}</Link>{t("。iOS 正在真机开发验证中，尚未公开分发。")}</>,
     },
     {
       q: t("升级会丢配置吗？"),
