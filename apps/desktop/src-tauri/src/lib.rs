@@ -1425,6 +1425,9 @@ fn set_profile_interval(
 async fn set_active_profile(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     commit_config_change(&state, |data| data.set_active_profile(&id))?;
     refresh_tray(&app);
+    // 托盘/前端切换共用此命令：发事件让前端各处（页头配置名、概览卡片等）
+    // 同步刷新——切换器自己的 DOM 事件只有页面内组件收得到（#357）。
+    let _ = app.emit("profile://switched", id.as_str());
     Ok(())
 }
 

@@ -340,6 +340,8 @@ export const ipc = {
   unsubscribeLogs: (subscriber: string) => invoke<void>("unsubscribe_logs", { subscriber }),
   onCoreStatus: (cb: (s: CoreStatus) => void) =>
     listen<CoreStatus>("core://status", (e) => cb(e.payload)),
+  onProfileSwitched: (cb: (id: string) => void) =>
+    listen<string>("profile://switched", (e) => cb(parsePayload<string>(e.payload))),
   onSysproxyStatus: (cb: (s: SysProxyStatus) => void) =>
     listen<SysProxyStatus>("sysproxy://status", (e) => cb(e.payload)),
   onCoreMode: (cb: (m: CoreMode) => void) =>
