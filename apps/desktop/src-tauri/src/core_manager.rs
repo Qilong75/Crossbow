@@ -788,6 +788,51 @@ impl CoreManager {
     }
 
     /// 优雅停止：标记后杀进程，watch 线程随之退出。
+    /// 健康检查触发的内核优雅重启信号（#350）：SIGTERM 不收走句柄、
+    /// 不置 stopping——watch 循环检测退出后按崩溃自动重启拉起新内核
+    /// （TUN 路由由 mihomo 退出钩子恢复）。复用 tun_health_restart
+    /// 15 分钟节流，与 60s 自检共享，避免双重重启竞速。
+    #[cfg(unix)]
+    pub fn signal_graceful_restart(&self) -> bool {
+        let outcome = {
+            let mut inner = self.shared.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.stopping || inner.detached {
+                return false;
+            }
+            let Some(child) = inner.child.as_mut() else {
+                return false;
+            };
+            // try_wait 也覆盖 watch 线程已 reap 的退出
+            if !matches!(child.try_wait(), Ok(None)) {
+                return false;
+            }
+            let pid = child.id();
+            let result = signal_pid(pid, libc::SIGTERM);
+            if result.is_ok() {
+                // tun_health_restart 仅 macOS 存在（gvisor 栈僵死节流）；
+                // Linux 上信号天然不发（服务承载内核无 child 句柄）。
+                #[cfg(target_os = "macos")]
+                {
+                    inner.tun_health_restart = Some((pid, Instant::now()));
+                }
+                let _ = pid;
+            }
+            result
+        };
+        match outcome {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("core graceful restart signal failed: {error}");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn signal_graceful_restart(&self) -> bool {
+        false // Windows TUN 内核由 SYSTEM 服务承载，停止走服务通道
+    }
+
     pub fn stop(&self) -> bool {
         #[cfg(target_os = "linux")]
         {
