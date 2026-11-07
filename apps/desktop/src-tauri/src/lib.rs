@@ -3789,6 +3789,7 @@ fn port_has_listener(port: u16) -> bool {
     .is_ok()
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn data_dir_for_early_hooks() -> std::path::PathBuf {
     #[cfg(target_os = "macos")]
     {
