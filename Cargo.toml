@@ -9,7 +9,7 @@ members = [
 [workspace.package]
 version = "0.13.8"
 edition = "2021"
-license = "GPL-3.0"
+license = "MIT"
 authors = ["Crossbow Contributors"]
 
 [workspace.dependencies]
