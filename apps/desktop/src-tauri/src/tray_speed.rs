@@ -5,28 +5,30 @@
 //! 精确基线偏移把两行垂直居中在按钮内，并按内容宽度设定 status item 长度以避免
 //! 每秒抖动。仅 macOS，其余平台为空操作。
 
-use crate::tray_state::TrayNodeRow;
+use crate::tray_helper::{self, Command, Event};
+use crate::tray_menu::Entry;
+use crate::tray_state::{TrayMenuData, TrayNodeRow};
+use std::cell::{Cell, RefCell};
 use tauri::{AppHandle, Manager};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::runtime::ProtocolObject;
-use objc2::{define_class, msg_send, DeclaredClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSAppearanceCustomization as _;
 use objc2_app_kit::NSAttributedStringNSStringDrawing as _;
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSBaselineOffsetAttributeName, NSColor,
-    NSControlSize, NSEvent, NSFont, NSFontAttributeName, NSFontWeightMedium, NSFontWeightRegular,
-    NSForegroundColorAttributeName, NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate,
-    NSMenuDidBeginTrackingNotification, NSMenuItem, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSProgressIndicator, NSProgressIndicatorStyle,
-    NSStatusBarButton, NSStatusItem, NSTextAlignment, NSTextField, NSView,
+    NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSBaselineOffsetAttributeName,
+    NSCellImagePosition, NSColor, NSControlSize, NSEvent, NSFont, NSFontAttributeName,
+    NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSImageView,
+    NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSProgressIndicator, NSProgressIndicatorStyle, NSStatusBar,
+    NSStatusItem, NSTextAlignment, NSTextField, NSView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSAttributedStringKey, NSDictionary, NSNotification, NSNotificationCenter,
-    NSNumber, NSObject, NSObjectProtocol, NSString,
+    NSAttributedString, NSAttributedStringKey, NSData, NSDictionary, NSNumber, NSObject,
+    NSObjectProtocol, NSString,
 };
-use std::sync::{Mutex, OnceLock};
 
 const FONT_SIZE: f64 = 9.5;
 const LINE_HEIGHT: f64 = 10.0;
@@ -37,16 +39,7 @@ const MIN_LENGTH: f64 = 56.0;
 const NS_VARIABLE_LENGTH: f64 = -1.0;
 
 thread_local! {
-    static MENU_OBSERVER: std::cell::RefCell<Option<Retained<TrayMenuObserver>>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Tray ticks arrive on a websocket reader thread while clear() can run on a
-/// core lifecycle thread. Keep this cache process-wide so those paths cannot
-/// disagree about the last title and leave a stale rate rendered in the menu bar.
-static LAST_SPEED: OnceLock<Mutex<String>> = OnceLock::new();
-
-fn last_speed() -> &'static Mutex<String> {
-    LAST_SPEED.get_or_init(|| Mutex::new(String::new()))
+    static STATUS_MENU: std::cell::OnceCell<Retained<StatusMenu>> = const { std::cell::OnceCell::new() };
 }
 
 // 速率文本：上行在上、下行在下；每行 `{:>6}` 填充——等宽字体下
@@ -149,13 +142,13 @@ fn set_badge_text(badge: &NSTextField, text: &str) -> f64 {
     }
 }
 
-// 主线程应用富文本标题（with_inner_tray_icon 的回调在主线程执行）。
+// AppKit owns the button hit area, including the attributed speed title.
 fn apply(status_item: &NSStatusItem, text: &str, show_speed: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         eprintln!("tray_speed: not on main thread, skip");
         return;
     };
-    let Some(button): Option<Retained<NSStatusBarButton>> = status_item.button(mtm) else {
+    let Some(button) = status_item.button(mtm) else {
         return;
     };
     let ns_text = NSString::from_str(text);
@@ -173,70 +166,19 @@ fn apply(status_item: &NSStatusItem, text: &str, show_speed: bool) {
         }
     }
     button.setAttributedTitle(&attr_str);
-
-    // tray-icon routes status-item clicks through a transparent TrayTarget
-    // subview created at the button's original icon-only size. Changing the
-    // NSStatusItem length does not resize that subview, so the added title area
-    // looks clickable but misses menu events. Keep the hit target covering the
-    // full button whenever its title/length changes.
-    if let Some(target) = button.subviews().firstObject() {
-        target.setFrame(button.bounds());
-    }
 }
 
 // 更新托盘速率双行显示。
 pub fn set_speed(handle: &AppHandle, up: u64, down: u64) {
-    let text = speed_text(up, down);
-    {
-        let last = last_speed().lock().unwrap_or_else(|e| e.into_inner());
-        if last.as_str() == text {
-            return;
-        }
-    }
-    let text_for_apply = text.clone();
-    if handle
-        .tray_by_id_or_first(move |item| apply(item, &text_for_apply, true))
-        .is_ok()
-    {
-        *last_speed().lock().unwrap_or_else(|e| e.into_inner()) = text;
-    }
+    send(handle, Command::Speed(speed_text(up, down)));
 }
 
-// 清空速率显示（内核停止等场景），status item 宽度恢复自适应。
 pub fn clear(handle: &AppHandle) {
-    *last_speed().lock().unwrap_or_else(|e| e.into_inner()) = String::new();
-    let _ = handle.tray_by_id_or_first(|item| {
-        item.setLength(NS_VARIABLE_LENGTH);
-        apply(item, "", false);
-    });
+    send(handle, Command::Speed(String::new()));
 }
 
-// 取应用唯一的托盘（我们不建多个），在主线程上执行操作。
-trait TrayExt {
-    fn tray_by_id_or_first(
-        &self,
-        f: impl FnOnce(&NSStatusItem) + Send + 'static,
-    ) -> Result<(), String>;
-}
-
-impl TrayExt for AppHandle {
-    fn tray_by_id_or_first(
-        &self,
-        f: impl FnOnce(&NSStatusItem) + Send + 'static,
-    ) -> Result<(), String> {
-        use tauri::Manager;
-        let state = self.state::<crate::AppState>();
-        let tray = state.tray.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let Some(tray) = tray else {
-            return Err("no tray".into());
-        };
-        tray.with_inner_tray_icon(move |inner| {
-            if let Some(item) = inner.ns_status_item() {
-                f(&item);
-            }
-        })
-        .map_err(|e| e.to_string())
-    }
+fn with_status_menu<T>(f: impl FnOnce(&StatusMenu) -> T) -> Option<T> {
+    STATUS_MENU.with(|slot| slot.get().map(|tray| f(tray)))
 }
 
 // ---------- 托盘节点子菜单：固定宽度、右对齐测速列 ----------
@@ -297,8 +239,8 @@ const ROW_CONTENT_INSET: f64 = 6.0;
 const HOVER_CORNER_RADIUS: f64 = 7.0;
 
 // NSMenuItem custom views do not automatically dispatch the menu item's action.
-// Forward the click to the original target/action so Tauri still receives the
-// same menu event as it does for a standard check-menu item.
+// Forward the click to the native target so Crossbow still receives the
+// same action as it does for a standard check-menu item.
 define_class!(
     #[unsafe(super(NSView))]
     #[name = "CrossbowTrayNodeRowView"]
@@ -809,41 +751,38 @@ fn set_menu_item_hovered(item: &NSMenuItem, hovered: bool) {
     }
 }
 
-fn install_menu_delegate(menu: &NSMenu, delegate: &TrayMenuObserver) {
-    menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
-    for index in 0..menu.numberOfItems() {
-        if let Some(submenu) = menu.itemAtIndex(index).and_then(|item| item.submenu()) {
-            install_menu_delegate(&submenu, delegate);
-        }
-    }
-}
-
 fn layer_for(view: &NSView) -> Option<Retained<AnyObject>> {
     unsafe { msg_send![view, layer] }
 }
 
+struct StatusMenuState {
+    dispatch: Box<dyn Fn(Event)>,
+    item: Retained<NSStatusItem>,
+    tracking: Cell<bool>,
+    pending_menu: RefCell<Option<(Vec<Entry>, TrayMenuData)>>,
+    speed: RefCell<String>,
+}
+
 define_class!(
     #[unsafe(super(NSObject))]
-    #[name = "CrossbowTrayMenuObserver"]
+    #[name = "CrossbowStatusMenu"]
     #[thread_kind = MainThreadOnly]
-    #[ivars = AppHandle]
-    struct TrayMenuObserver;
+    #[ivars = StatusMenuState]
+    struct StatusMenu;
 
-    unsafe impl NSObjectProtocol for TrayMenuObserver {}
+    unsafe impl NSObjectProtocol for StatusMenu {}
 
-    unsafe impl NSMenuDelegate for TrayMenuObserver {
+    unsafe impl NSMenuDelegate for StatusMenu {
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, menu: &NSMenu) {
-            // Tracking begins on the parent menu. Refresh when AppKit actually
-            // opens the node submenu, even if it never posts its own tracking event.
-            if (0..menu.numberOfItems()).any(|index| {
-                menu.itemAtIndex(index)
-                    .is_some_and(|item| is_delay_test_item(&item))
-            }) {
-                crate::refresh_tray_nodes(self.ivars(), true);
+            if self.is_root(menu) {
+                self.ivars().tracking.set(true);
             }
-            for index in 0..menu.numberOfItems() {
-                if let Some(view) = menu.itemAtIndex(index).and_then(|item| item.view()) {
+            if is_node_menu(menu) {
+                (self.ivars().dispatch)(Event::RefreshNodes);
+            }
+            for item in menu.itemArray().iter() {
+                if let Some(view) = item.view() {
                     let pending = view.viewWithTag(ROW_VIEW_BADGE_TAG).is_some_and(|badge| badge.isHidden());
                     set_node_spinner_running(&view, pending);
                 }
@@ -852,18 +791,30 @@ define_class!(
 
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, menu: &NSMenu) {
-            for index in 0..menu.numberOfItems() {
-                if let Some(view) = menu.itemAtIndex(index).and_then(|item| item.view()) {
+            for item in menu.itemArray().iter() {
+                if let Some(view) = item.view() {
                     set_node_spinner_running(&view, false);
                 }
+                set_menu_item_hovered(&item, false);
+            }
+            if self.is_root(menu) {
+                self.ivars().tracking.set(false);
+                // Replace the attached menu after AppKit finishes the close.
+                dispatch2::DispatchQueue::main().exec_async(|| {
+                    with_status_menu(|tray| {
+                        let pending = tray.ivars().pending_menu.take();
+                        if let Some((entries, data)) = pending {
+                            tray.rebuild(entries, data);
+                        }
+                    });
+                });
             }
         }
 
         #[unsafe(method(menu:willHighlightItem:))]
         #[allow(non_snake_case)]
         fn menu_willHighlightItem(&self, menu: &NSMenu, highlighted: Option<&NSMenuItem>) {
-            for index in 0..menu.numberOfItems() {
-                let Some(item) = menu.itemAtIndex(index) else { continue };
+            for item in menu.itemArray().iter() {
                 let is_highlighted = highlighted.is_some_and(|candidate| {
                     std::ptr::eq(&*item, candidate)
                 });
@@ -872,63 +823,222 @@ define_class!(
         }
     }
 
-    impl TrayMenuObserver {
-        #[unsafe(method(menuDidBeginTracking:))]
-        fn menu_did_begin_tracking(&self, notification: &NSNotification) {
-            let Some(menu) = notification
-                .object()
-                .and_then(|object| object.downcast::<NSMenu>().ok())
-            else {
-                return;
-            };
-            let handle = self.ivars();
-            update_state_labels(&menu, handle);
-            install_menu_delegate(&menu, self);
-            // 非节点菜单（如模式和配置子菜单）：勾选态随当前状态刷新
-            if !contains_delay_test(&menu) {
-                update_profile_checkmarks(&menu, handle);
-                update_mode_checkmarks(&menu, handle);
-                update_simple_check_rows(&menu, handle);
-                return;
+    impl StatusMenu {
+        #[unsafe(method(performMenuAction:))]
+        fn perform_menu_action(&self, item: &NSMenuItem) {
+            if item.isEnabled() {
+                if let Some(id) = item_id(item) {
+                    (self.ivars().dispatch)(Event::Action(id));
+                }
             }
-            let Some(state) = handle.try_state::<crate::AppState>() else {
-                return;
-            };
-            let lang = state.store.lock().unwrap().data().ui.lang.clone();
-            let data = state.node_menu.lock().unwrap_or_else(|e| e.into_inner()).snapshot(
-                &crate::tr(&lang, "节点选择", "Nodes"),
-                &crate::tr(&lang, "当前", "Current"),
-            );
-            let (menu_width, badge_tab) = node_menu_layout(&data.rows);
-            update_menu_items(&menu, &data.rows, data.testing, menu_width, badge_tab);
         }
     }
 );
 
-/// Install rows at the beginning of AppKit menu tracking. Tauri temporarily
-/// assigns the menu to NSStatusItem only while tracking, so refreshing it while
-/// closed cannot reach the menu; this notification runs before the first rows
-/// are displayed and keeps custom badges/actions ready on every opening.
-pub fn install_menu_observer(handle: &AppHandle) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let observer = TrayMenuObserver::alloc(mtm).set_ivars(handle.clone());
-    let observer: Retained<TrayMenuObserver> = unsafe { msg_send![super(observer), init] };
-    let center = NSNotificationCenter::defaultCenter();
-    unsafe {
-        center.addObserver_selector_name_object(
-            &*observer,
-            objc2::sel!(menuDidBeginTracking:),
-            Some(NSMenuDidBeginTrackingNotification),
-            None,
-        );
+impl StatusMenu {
+    fn is_root(&self, menu: &NSMenu) -> bool {
+        self.ivars()
+            .item
+            .menu(MainThreadMarker::from(self))
+            .is_some_and(|root| std::ptr::eq(&*root, menu))
     }
-    MENU_OBSERVER.with(|current| *current.borrow_mut() = Some(observer));
+
+    fn rebuild(&self, entries: Vec<Entry>, data: TrayMenuData) {
+        if self.ivars().tracking.get() {
+            self.ivars().pending_menu.replace(Some((entries, data)));
+            return;
+        }
+        self.ivars().pending_menu.take();
+        let root = build_native_menu("", &entries, self);
+        update_node_rows(&root, &data.title, &data.rows, data.testing);
+        // Leave the menu attached even while closed. AppKit can track it from
+        // another Space without an overlay view or a synthetic button click.
+        self.ivars().item.setMenu(Some(&root));
+    }
 }
 
-pub fn display_name(name: &str) -> String {
-    truncate_display_name(&format_flag_spacing(name), 202.0)
+fn item_id(item: &NSMenuItem) -> Option<String> {
+    item.representedObject()?
+        .downcast::<NSString>()
+        .ok()
+        .map(|id| id.to_string())
+}
+
+fn is_node_menu(menu: &NSMenu) -> bool {
+    menu.itemArray()
+        .firstObject()
+        .is_some_and(|item| item_id(&item).as_deref() == Some("tray-delay-test"))
+}
+
+fn build_native_menu(title: &str, entries: &[Entry], target: &StatusMenu) -> Retained<NSMenu> {
+    let mtm = MainThreadMarker::from(target);
+    let menu = NSMenu::new(mtm);
+    menu.setTitle(&NSString::from_str(title));
+    menu.setAutoenablesItems(false);
+    menu.setDelegate(Some(ProtocolObject::from_ref(target)));
+    let check_width = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Action { id, title, .. }
+                if id.starts_with("mode-") || id.starts_with("profile-") =>
+            {
+                Some(display_width(title) as f64 * 7.1 + 42.0)
+            }
+            _ => None,
+        })
+        .reduce(f64::max)
+        .map(|width| width.clamp(110.0, 300.0));
+    if let Some(width) = check_width {
+        menu.setMinimumWidth(width);
+    }
+    for entry in entries {
+        let item = match entry {
+            Entry::Separator => NSMenuItem::separatorItem(mtm),
+            Entry::Submenu(title, children) => {
+                let item = NSMenuItem::new(mtm);
+                item.setTitle(&NSString::from_str(title));
+                item.setSubmenu(Some(&build_native_menu(title, children, target)));
+                item.setEnabled(true);
+                item
+            }
+            Entry::Action {
+                id,
+                title,
+                enabled,
+                checked,
+            } => {
+                let item = unsafe {
+                    let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &NSString::from_str(title),
+                        Some(objc2::sel!(performMenuAction:)),
+                        &NSString::from_str(""),
+                    );
+                    item.setTarget(Some(target));
+                    item.setRepresentedObject(Some(&NSString::from_str(id)));
+                    item
+                };
+                item.setEnabled(*enabled);
+                if let Some(checked) = checked {
+                    item.setState(isize::from(*checked));
+                    if let Some(width) = check_width {
+                        let view = make_check_row_view(mtm, width);
+                        update_check_row_view(&view, title, *checked, width);
+                        item.setView(Some(&view));
+                    }
+                }
+                item
+            }
+        };
+        menu.addItem(&item);
+    }
+    menu
+}
+
+pub fn install(handle: &AppHandle) -> std::io::Result<()> {
+    match tray_helper::start(handle) {
+        Ok(Some(helper)) => {
+            handle.manage(helper);
+        }
+        Ok(None) => install_in_process(handle)?,
+        Err(error) => {
+            eprintln!("could not start native tray process: {error}");
+            install_in_process(handle)?;
+        }
+    }
+    refresh_menu(handle);
+    Ok(())
+}
+
+fn install_in_process(handle: &AppHandle) -> std::io::Result<()> {
+    let handle = handle.clone();
+    install_native(move |event| tray_helper::dispatch(&handle, event))
+}
+
+pub(crate) fn helper_stopped(handle: &AppHandle) {
+    if let Err(error) = install_in_process(handle) {
+        eprintln!("could not restore native status item: {error}");
+        return;
+    }
+    refresh_menu(handle);
+    crate::sync_tray_traffic(handle);
+}
+
+pub(crate) fn install_native(dispatch: impl Fn(Event) + 'static) -> std::io::Result<()> {
+    let mtm = MainThreadMarker::new().expect("tray setup runs on the main thread");
+    let image = NSImage::initWithData(
+        NSImage::alloc(),
+        &NSData::with_bytes(include_bytes!("../icons/tray-icon.png")),
+    )
+    .ok_or_else(|| std::io::Error::other("invalid Crossbow status icon"))?;
+    image.setTemplate(true);
+    image.setSize(objc2_foundation::NSSize::new(18.0, 18.0));
+    let bar = NSStatusBar::systemStatusBar();
+    let item = bar.statusItemWithLength(NS_VARIABLE_LENGTH);
+    let Some(button) = item.button(mtm) else {
+        bar.removeStatusItem(&item);
+        return Err(std::io::Error::other("missing Crossbow status button"));
+    };
+    button.setImage(Some(&image));
+    button.setImagePosition(NSCellImagePosition::ImageLeft);
+    button.setToolTip(Some(&NSString::from_str("Crossbow")));
+    let tray = StatusMenu::alloc(mtm).set_ivars(StatusMenuState {
+        dispatch: Box::new(dispatch),
+        item,
+        tracking: Cell::new(false),
+        pending_menu: RefCell::new(None),
+        speed: RefCell::new(String::new()),
+    });
+    let tray: Retained<StatusMenu> = unsafe { msg_send![super(tray), init] };
+    STATUS_MENU.with(|slot| {
+        if let Err(tray) = slot.set(tray) {
+            bar.removeStatusItem(&tray.ivars().item);
+            return Err(std::io::Error::other(
+                "Crossbow status menu already installed",
+            ));
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
+pub fn refresh_menu(handle: &AppHandle) {
+    let data = crate::tray_menu_data(&handle.state::<crate::AppState>());
+    let entries = crate::tray_menu_entries(handle, &data);
+    send(handle, Command::Menu(entries, data));
+}
+
+fn send(handle: &AppHandle, command: Command) {
+    let command = match handle.try_state::<tray_helper::Helper>() {
+        Some(helper) => match helper.send(command) {
+            Ok(()) => return,
+            Err(command) => command,
+        },
+        None => command,
+    };
+    let _ = handle.run_on_main_thread(move || apply_command(command));
+}
+
+pub(crate) fn apply_command(command: Command) {
+    with_status_menu(|tray| match command {
+        Command::Menu(entries, data) => tray.rebuild(entries, data),
+        Command::Nodes(data) => {
+            if !update_status_node_rows(tray, &data.title, &data.rows, data.testing) {
+                (tray.ivars().dispatch)(Event::RefreshMenu);
+            }
+        }
+        Command::Speed(text) => {
+            let state = tray.ivars();
+            if *state.speed.borrow() != text {
+                let show = !text.is_empty();
+                if !show {
+                    state.item.setLength(NS_VARIABLE_LENGTH);
+                }
+                apply(&state.item, &text, show);
+                state.speed.replace(text);
+            }
+        }
+    });
 }
 
 pub fn format_flag_spacing(name: &str) -> String {
@@ -966,333 +1076,106 @@ fn truncate_display_name_with_unit(name: &str, max_width: f64, width_per_unit: f
     out
 }
 
-// 原地更新打开中的托盘节点菜单（不重建菜单，所以选择后可继续操作）。
+// Update only a matching menu: when the group changes, old rows must keep
+// their own actions until the structural rebuild can safely replace the menu.
 pub fn update_node_menu(
     handle: &AppHandle,
     title: &str,
     rows: &[TrayNodeRow],
     testing: bool,
 ) -> bool {
-    let state = handle.state::<crate::AppState>();
-    let tray = state.tray.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let Some(tray) = tray else { return false };
-    let rows_owned: Vec<TrayNodeRow> = rows.to_vec();
-    let title_owned = title.to_string();
-    let testing_owned = testing;
-    let updated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let updated_in_callback = updated.clone();
-    let _ = tray.with_inner_tray_icon(move |inner| {
-        let Some(status_item) = inner.ns_status_item() else {
-            return;
-        };
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
-        let Some(menu) = status_item.menu(mtm) else {
-            return;
-        };
-        let has_node_menu = update_node_parent_title(&menu, &title_owned);
-        let (menu_width, badge_tab) = node_menu_layout(&rows_owned);
-        update_menu_items(&menu, &rows_owned, testing_owned, menu_width, badge_tab);
-        updated_in_callback.store(has_node_menu, std::sync::atomic::Ordering::SeqCst);
-    });
-    updated.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-fn update_node_parent_title(menu: &NSMenu, title: &str) -> bool {
-    for index in 0..menu.numberOfItems() {
-        let Some(item) = menu.itemAtIndex(index) else {
-            continue;
-        };
-        if let Some(submenu) = item.submenu() {
-            if contains_delay_test(&submenu) {
-                item.setTitle(&NSString::from_str(&format_flag_spacing(title)));
-                return true;
-            }
-            if update_node_parent_title(&submenu, title) {
-                return true;
-            }
+    if let Some(helper) = handle.try_state::<tray_helper::Helper>() {
+        if helper
+            .send(Command::Nodes(TrayMenuData {
+                title: title.to_owned(),
+                rows: rows.to_vec(),
+                testing,
+            }))
+            .is_ok()
+        {
+            return true;
         }
     }
-    false
-}
-
-fn is_delay_test_item(item: &NSMenuItem) -> bool {
-    matches!(
-        item.title().to_string().as_str(),
-        "延迟测速" | "延迟测速中…" | "Test latency" | "Testing latency…"
-    )
-}
-
-fn contains_delay_test(menu: &NSMenu) -> bool {
-    (0..menu.numberOfItems()).any(|index| {
-        menu.itemAtIndex(index).is_some_and(|item| {
-            is_delay_test_item(&item)
-                || item
-                    .submenu()
-                    .is_some_and(|submenu| contains_delay_test(&submenu))
+    if MainThreadMarker::new().is_some() {
+        return with_status_menu(|tray| update_status_node_rows(tray, title, rows, testing))
+            .unwrap_or(false);
+    }
+    let title = title.to_owned();
+    let rows = rows.to_vec();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    if handle
+        .run_on_main_thread(move || {
+            let updated =
+                with_status_menu(|tray| update_status_node_rows(tray, &title, &rows, testing))
+                    .unwrap_or(false);
+            let _ = tx.send(updated);
         })
-    })
+        .is_err()
+    {
+        return false;
+    }
+    rx.recv().unwrap_or(false)
 }
 
-/// 菜单展开瞬间同步状态项文字（系统代理开/关、当前模式标题）。
-/// 标题按 build_tray_menu 的格式重建：切换可来自 UI 或托盘任一侧，
-/// 以当前 AppState 为准原位刷新。
-fn update_state_labels(menu: &NSMenu, handle: &AppHandle) {
-    let Some(state) = handle.try_state::<crate::AppState>() else {
-        return;
-    };
-    let (lang, tun_enabled) = {
-        let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
-        (store.data().ui.lang.clone(), store.data().engine.tun_enable)
-    };
-    let sp = state.sysproxy.status();
-    let mode = state.mode.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let proxy_title = if sp.enabled {
-        format!(
-            "{} :{}",
-            crate::tr(&lang, "系统代理：已开启", "System Proxy: On"),
-            sp.port
-        )
-    } else {
-        crate::tr(&lang, "系统代理：已关闭", "System Proxy: Off")
-    };
-    let tun_title = if tun_enabled {
-        if state.core().status() == crate::CoreStatus::Running {
-            crate::tr(&lang, "TUN 模式：运行中", "TUN mode: Running")
-        } else {
-            crate::tr(
-                &lang,
-                "TUN 已开启 · 内核未运行",
-                "TUN enabled · core stopped",
-            )
-        }
-    } else {
-        crate::tr(&lang, "TUN 模式：已关闭", "TUN mode: Off")
-    };
-    let mode_title = format!(
-        "{}：{}",
-        crate::tr(&lang, "模式", "Mode"),
-        crate::tr(
-            &lang,
-            match mode.as_str() {
-                "direct" => "直连",
-                "global" => "全局",
-                _ => "规则",
-            },
-            match mode.as_str() {
-                "direct" => "Direct",
-                "global" => "Global",
-                _ => "Rule",
-            }
-        )
-    );
-    for index in 0..menu.numberOfItems() {
-        let Some(item) = menu.itemAtIndex(index) else {
-            continue;
-        };
-        let title = item.title().to_string();
-        let new_title = if title.starts_with("系统代理") || title.starts_with("System Proxy") {
-            Some(proxy_title.clone())
-        } else if title.starts_with("TUN ") {
-            Some(tun_title.clone())
-        } else if title.starts_with("模式") || title.starts_with("Mode") {
-            Some(mode_title.clone())
-        } else {
-            None
-        };
-        if let Some(new_title) = new_title {
-            item.setTitle(&NSString::from_str(&new_title));
-            item.setEnabled(true);
-        }
-    }
-}
-
-/// 模式子菜单的勾选态随当前模式刷新（直连/规则/全局）。
-fn update_mode_checkmarks(menu: &NSMenu, handle: &AppHandle) {
-    let Some(state) = handle.try_state::<crate::AppState>() else {
-        return;
-    };
-    let lang = state
-        .store
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .data()
-        .ui
-        .lang
-        .clone();
-    let mode = state.mode.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let marks: [(&str, &str, bool); 3] = [
-        (
-            &crate::tr(&lang, "直连", "Direct"),
-            "direct",
-            mode == "direct",
-        ),
-        (&crate::tr(&lang, "规则", "Rule"), "rule", mode == "rule"),
-        (
-            &crate::tr(&lang, "全局", "Global"),
-            "global",
-            mode == "global",
-        ),
-    ];
-    for index in 0..menu.numberOfItems() {
-        let Some(item) = menu.itemAtIndex(index) else {
-            continue;
-        };
-        let title = item.title().to_string();
-        if let Some((_, _, on)) = marks.iter().find(|(label, _, _)| *label == title) {
-            // NSControlStateValueOn=1 / Off=0，避开 NSControl feature 依赖
-            let _: () = unsafe { msg_send![&*item, setState: (*on) as isize] };
-        }
-    }
-}
-
-fn update_profile_checkmarks(menu: &NSMenu, handle: &AppHandle) {
-    let Some(state) = handle.try_state::<crate::AppState>() else {
-        return;
-    };
-    let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
-    let profiles = &store.data().profiles;
-    if profiles.is_empty() || profiles.len() != menu.numberOfItems() as usize {
-        return;
-    }
-    for (index, profile) in profiles.iter().enumerate() {
-        let Some(item) = menu.itemAtIndex(index as isize) else {
-            return;
-        };
-        if item.title().to_string() != profile.name {
-            return;
-        }
-    }
-    for (index, profile) in profiles.iter().enumerate() {
-        if let Some(item) = menu.itemAtIndex(index as isize) {
-            let selected = store.data().active_profile.as_deref() == Some(profile.id.as_str());
-            let _: () = unsafe { msg_send![&*item, setState: selected as isize] };
-        }
-    }
-}
-
-fn update_simple_check_rows(menu: &NSMenu, handle: &AppHandle) {
-    let Some(state) = handle.try_state::<crate::AppState>() else {
-        return;
-    };
-    let store = state.store.lock().unwrap_or_else(|e| e.into_inner());
-    let titles = (0..menu.numberOfItems())
-        .filter_map(|index| menu.itemAtIndex(index))
-        .map(|item| item.title().to_string())
-        .collect::<Vec<_>>();
-    if titles.is_empty() || titles.len() != menu.numberOfItems() as usize {
-        return;
-    }
-    let mode_titles = [
-        crate::tr(&store.data().ui.lang, "直连", "Direct"),
-        crate::tr(&store.data().ui.lang, "规则", "Rule"),
-        crate::tr(&store.data().ui.lang, "全局", "Global"),
-    ];
-    let is_mode = titles.len() == mode_titles.len()
-        && titles.iter().zip(mode_titles.iter()).all(|(a, b)| a == b);
-    let is_profiles = !store.data().profiles.is_empty()
-        && titles.len() == store.data().profiles.len()
-        && titles
-            .iter()
-            .zip(store.data().profiles.iter())
-            .all(|(title, profile)| title == &profile.name);
-    drop(store);
-    if !is_mode && !is_profiles {
-        return;
-    }
-    let width = titles
-        .iter()
-        .map(|title| display_width(title) as f64 * 7.1 + 42.0)
-        .fold(110.0, f64::max)
-        .min(300.0);
-    menu.setMinimumWidth(width);
-    let mtm = MainThreadMarker::new().expect("tray menu updates run on the main thread");
-    for (index, title) in titles.iter().enumerate() {
-        let Some(item) = menu.itemAtIndex(index as isize) else {
-            continue;
-        };
-        let row_view = item
-            .view()
-            .and_then(|view| view.downcast::<TrayCheckRowView>().ok())
-            .unwrap_or_else(|| make_check_row_view(mtm, width));
-        update_check_row_view(&row_view, title, item.state() == 1, width);
-        item.setView(Some(&row_view));
-    }
-}
-
-fn node_menu_layout(_rows: &[TrayNodeRow]) -> (f64, f64) {
-    // Fixed menu width and right edge for the badge column. Long node names are
-    // truncated to keep this width stable after every benchmark result.
-    (NODE_MENU_WIDTH, NODE_MENU_WIDTH - 30.0)
-}
-
-fn update_menu_items(
-    menu: &NSMenu,
+fn update_status_node_rows(
+    tray: &StatusMenu,
+    title: &str,
     rows: &[TrayNodeRow],
     testing: bool,
-    menu_width: f64,
-    badge_tab: f64,
-) {
-    let is_node_menu = (0..menu.numberOfItems()).any(|index| {
-        menu.itemAtIndex(index)
-            .is_some_and(|item| is_delay_test_item(&item))
-    });
-    if is_node_menu {
-        menu.setMinimumWidth(menu_width);
-    }
+) -> bool {
+    tray.ivars()
+        .item
+        .menu(MainThreadMarker::from(tray))
+        .is_some_and(|root| update_node_rows(&root, title, rows, testing))
+}
 
-    let mut row_index = 0;
-    for index in 0..menu.numberOfItems() {
-        let Some(item) = menu.itemAtIndex(index) else {
-            continue;
-        };
-        let title = item.title().to_string();
-        if is_delay_test_item(&item) {
-            let chinese = title.starts_with("延迟");
-            let text = match (testing, chinese) {
-                (true, true) => "延迟测速中…",
-                (false, true) => "延迟测速",
-                (true, false) => "Testing latency…",
-                (false, false) => "Test latency",
-            };
-            item.setTitle(&NSString::from_str(text));
-            item.setEnabled(!testing);
-            let mtm = MainThreadMarker::new().expect("tray menu updates run on the main thread");
-            let row_view = item
-                .view()
-                .and_then(|view| view.downcast::<TrayActionRowView>().ok())
-                .unwrap_or_else(|| make_action_row_view(mtm));
-            update_action_row_view(&row_view, text, !testing, menu_width);
-            item.setView(Some(&row_view));
-        } else if is_node_menu && !title.is_empty() {
-            let represented_name = item
-                .representedObject()
-                .and_then(|value| value.downcast::<NSString>().ok())
-                .map(|value| value.to_string());
-            let row = represented_name
+fn update_node_rows(root: &NSMenu, title: &str, rows: &[TrayNodeRow], testing: bool) -> bool {
+    let Some((parent, submenu)) = root.itemArray().iter().find_map(|parent| {
+        let submenu = parent.submenu()?;
+        is_node_menu(&submenu).then_some((parent, submenu))
+    }) else {
+        return rows.is_empty();
+    };
+    let items = submenu.itemArray();
+    if items.len() != rows.len() + 2
+        || !items.iter().skip(2).zip(rows).all(|(item, row)| {
+            item_id(&item)
                 .as_deref()
-                .and_then(|name| rows.iter().find(|row| row.name == name))
-                .or_else(|| rows.get(row_index));
-            row_index += 1;
-            if let Some(row) = row {
-                unsafe {
-                    item.setRepresentedObject(Some(&NSString::from_str(&row.name)));
-                }
-                let mtm =
-                    MainThreadMarker::new().expect("tray menu updates run on the main thread");
-                let row_view = item
-                    .view()
-                    .and_then(|view| view.downcast::<TrayNodeRowView>().ok())
-                    .unwrap_or_else(|| make_node_row_view(mtm));
-                update_node_row_view(&row_view, row, row.ms, menu_width, mtm);
-                item.setView(Some(&row_view));
-                item.setState(if row.selected { 1 } else { 0 });
-            }
-        }
-
-        if let Some(submenu) = item.submenu() {
-            update_menu_items(&submenu, rows, testing, menu_width, badge_tab);
-        }
+                .and_then(|id| id.strip_prefix("node-"))
+                == Some(row.name.as_str())
+        })
+    {
+        return false;
     }
+
+    parent.setTitle(&NSString::from_str(&format_flag_spacing(title)));
+    submenu.setMinimumWidth(NODE_MENU_WIDTH);
+    let mtm = MainThreadMarker::from(root);
+    let action = items.objectAtIndex(0);
+    let chinese = action.title().to_string().starts_with("延迟");
+    let text = match (testing, chinese) {
+        (true, true) => "延迟测速中…",
+        (false, true) => "延迟测速",
+        (true, false) => "Testing latency…",
+        (false, false) => "Test latency",
+    };
+    action.setTitle(&NSString::from_str(text));
+    action.setEnabled(!testing);
+    let view = action
+        .view()
+        .and_then(|view| view.downcast::<TrayActionRowView>().ok())
+        .unwrap_or_else(|| make_action_row_view(mtm));
+    update_action_row_view(&view, text, !testing, NODE_MENU_WIDTH);
+    action.setView(Some(&view));
+
+    for (item, row) in items.iter().skip(2).zip(rows) {
+        let view = item
+            .view()
+            .and_then(|view| view.downcast::<TrayNodeRowView>().ok())
+            .unwrap_or_else(|| make_node_row_view(mtm));
+        update_node_row_view(&view, row, row.ms, NODE_MENU_WIDTH, mtm);
+        item.setView(Some(&view));
+        item.setState(isize::from(row.selected));
+    }
+    true
 }

@@ -45,6 +45,7 @@ pub struct TrayState {
 
 /// 托盘节点子菜单的节点行数据。
 #[derive(Clone)]
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct TrayNodeRow {
     /// 节点名
     pub name: String,
@@ -65,6 +66,7 @@ pub struct TrayNodeRow {
 }
 
 /// 渲染托盘节点子菜单所需的纯数据快照。
+#[derive(serde::Deserialize, serde::Serialize)]
 pub struct TrayMenuData {
     /// 一级菜单标题，显示选择模式/当前手动节点。
     pub title: String,

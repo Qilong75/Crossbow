@@ -895,6 +895,7 @@ dependencies = [
  "crossbow-core",
  "crossbow-service",
  "dbus",
+ "dispatch2",
  "flate2",
  "libc",
  "objc2",
