@@ -5,28 +5,25 @@
 //! 精确基线偏移把两行垂直居中在按钮内，并按内容宽度设定 status item 长度以避免
 //! 每秒抖动。仅 macOS，其余平台为空操作。
 
+use crate::tray_helper::{self, Command, Event};
 use crate::tray_menu::Entry;
-use crate::tray_panel::{Selection, TrayPanel};
-use crate::tray_state::TrayNodeRow;
+use crate::tray_state::{TrayMenuData, TrayNodeRow};
 use std::cell::{Cell, RefCell};
 use tauri::{AppHandle, Manager};
 
-use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::runtime::ProtocolObject;
-use objc2::{
-    define_class, msg_send, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly, Message,
-};
+use objc2::{define_class, msg_send, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSAppearanceCustomization as _;
 use objc2_app_kit::NSAttributedStringNSStringDrawing as _;
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSBaselineOffsetAttributeName, NSButton,
-    NSCellImagePosition, NSColor, NSControlSize, NSEvent, NSEventMask, NSEventType, NSFont,
-    NSFontAttributeName, NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName,
-    NSImage, NSImageView, NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSProgressIndicator,
-    NSProgressIndicatorStyle, NSStatusBar, NSStatusItem, NSTextAlignment, NSTextField, NSView,
+    NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSBaselineOffsetAttributeName,
+    NSCellImagePosition, NSColor, NSControlSize, NSEvent, NSFont, NSFontAttributeName,
+    NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSImageView,
+    NSLineBreakMode, NSMenu, NSMenuDelegate, NSMenuItem, NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName, NSProgressIndicator, NSProgressIndicatorStyle, NSStatusBar,
+    NSStatusItem, NSTextAlignment, NSTextField, NSView,
 };
 use objc2_foundation::{
     NSAttributedString, NSAttributedStringKey, NSData, NSDictionary, NSNumber, NSObject,
@@ -173,27 +170,11 @@ fn apply(status_item: &NSStatusItem, text: &str, show_speed: bool) {
 
 // 更新托盘速率双行显示。
 pub fn set_speed(handle: &AppHandle, up: u64, down: u64) {
-    let text = speed_text(up, down);
-    let _ = handle.run_on_main_thread(move || {
-        with_status_menu(|tray| {
-            let state = tray.ivars();
-            if state.speed.borrow().as_str() != text {
-                state.speed.replace(text.clone());
-                apply(&state.item, &text, true);
-            }
-        });
-    });
+    send(handle, Command::Speed(speed_text(up, down)));
 }
 
 pub fn clear(handle: &AppHandle) {
-    let _ = handle.run_on_main_thread(|| {
-        with_status_menu(|tray| {
-            let state = tray.ivars();
-            state.speed.replace(String::new());
-            state.item.setLength(NS_VARIABLE_LENGTH);
-            apply(&state.item, "", false);
-        });
-    });
+    send(handle, Command::Speed(String::new()));
 }
 
 fn with_status_menu<T>(f: impl FnOnce(&StatusMenu) -> T) -> Option<T> {
@@ -775,15 +756,11 @@ fn layer_for(view: &NSView) -> Option<Retained<AnyObject>> {
 }
 
 struct StatusMenuState {
-    handle: AppHandle,
+    dispatch: Box<dyn Fn(Event)>,
     item: Retained<NSStatusItem>,
     tracking: Cell<bool>,
-    needs_rebuild: Cell<bool>,
+    pending_menu: RefCell<Option<(Vec<Entry>, TrayMenuData)>>,
     speed: RefCell<String>,
-    panel: RefCell<Option<TrayPanel>>,
-    session: RefCell<Option<Retained<AnyObject>>>,
-    panel_open: Cell<bool>,
-    mouse_monitors: RefCell<Vec<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -802,7 +779,7 @@ define_class!(
                 self.ivars().tracking.set(true);
             }
             if is_node_menu(menu) {
-                crate::refresh_tray_nodes(&self.ivars().handle, true);
+                (self.ivars().dispatch)(Event::RefreshNodes);
             }
             for item in menu.itemArray().iter() {
                 if let Some(view) = item.view() {
@@ -822,13 +799,15 @@ define_class!(
             }
             if self.is_root(menu) {
                 self.ivars().tracking.set(false);
-                if self.ivars().needs_rebuild.replace(false) {
-                    // Tauri runs main-thread calls inline when already on the
-                    // main thread. Dispatch from a worker to leave AppKit's
-                    // close callback before replacing the menu.
-                    let handle = self.ivars().handle.clone();
-                    tauri::async_runtime::spawn(async move { refresh_menu(&handle) });
-                }
+                // Replace the attached menu after AppKit finishes the close.
+                dispatch2::DispatchQueue::main().exec_async(|| {
+                    with_status_menu(|tray| {
+                        let pending = tray.ivars().pending_menu.take();
+                        if let Some((entries, data)) = pending {
+                            tray.rebuild(entries, data);
+                        }
+                    });
+                });
             }
         }
 
@@ -845,65 +824,11 @@ define_class!(
     }
 
     impl StatusMenu {
-        #[unsafe(method(statusItem:didBeginExpandedInterfaceSession:))]
-        fn begin_expanded_interface(&self, _item: &NSStatusItem, session: &AnyObject) {
-            self.ivars().session.replace(Some(session.retain()));
-            self.open_panel();
-        }
-
-        #[unsafe(method(statusItemDidEndExpandedInterfaceSession:animated:))]
-        fn end_expanded_interface(&self, _item: &NSStatusItem, _animated: objc2::runtime::Bool) {
-            self.ivars().session.take();
-            self.hide_panel();
-        }
-
-        #[unsafe(method(trayRightClick:))]
-        fn tray_right_click(&self, _button: &NSButton) {
-            let app = NSApplication::sharedApplication(MainThreadMarker::from(self));
-            if app.currentEvent().is_some_and(|event| event.r#type() == NSEventType::RightMouseUp) {
-                if self.ivars().panel_open.get() {
-                    self.cancel_panel();
-                } else {
-                    self.open_panel();
-                }
-            }
-        }
-
-        #[unsafe(method(trayPanelAction:))]
-        fn panel_action(&self, button: &NSButton) {
-            let action = self.ivars().panel.borrow().as_ref()
-                .and_then(|panel| panel.choose(button.tag()));
-            match action {
-                Some(Selection::Submenu(page)) => {
-                    if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
-                        panel.set_page(Some(page));
-                    }
-                    self.render_panel();
-                    if page == "nodes" {
-                        crate::refresh_tray_nodes(&self.ivars().handle, true);
-                    }
-                }
-                Some(Selection::Back) => {
-                    if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
-                        panel.set_page(None);
-                    }
-                    self.render_panel();
-                }
-                Some(Selection::Action(id)) => {
-                    if id != "tray-delay-test" && !id.starts_with("node-") {
-                        self.cancel_panel();
-                    }
-                    crate::handle_menu(&self.ivars().handle, &id);
-                }
-                None => {}
-            }
-        }
-
         #[unsafe(method(performMenuAction:))]
         fn perform_menu_action(&self, item: &NSMenuItem) {
             if item.isEnabled() {
                 if let Some(id) = item_id(item) {
-                    crate::handle_menu(&self.ivars().handle, &id);
+                    (self.ivars().dispatch)(Event::Action(id));
                 }
             }
         }
@@ -911,98 +836,6 @@ define_class!(
 );
 
 impl StatusMenu {
-    fn open_panel(&self) {
-        if self.ivars().panel_open.replace(true) {
-            return;
-        }
-        if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
-            panel.begin(MainThreadMarker::from(self));
-        }
-        self.render_panel();
-        // A local monitor sees Crossbow windows; a global mouse monitor sees
-        // the full-screen app underneath. Neither consumes the user's click.
-        let mouse =
-            NSEventMask::LeftMouseDown | NSEventMask::RightMouseDown | NSEventMask::OtherMouseDown;
-        let global = RcBlock::new(|_event: std::ptr::NonNull<NSEvent>| {
-            with_status_menu(|tray| tray.dismiss_if_outside());
-        });
-        let local = RcBlock::new(|event: std::ptr::NonNull<NSEvent>| {
-            with_status_menu(|tray| {
-                // The pointer is valid for the duration of the AppKit callback.
-                let event = unsafe { event.as_ref() };
-                if event.r#type() == NSEventType::KeyDown {
-                    if event.keyCode() == 53 && tray.ivars().panel_open.get() {
-                        tray.cancel_panel();
-                        return std::ptr::null_mut();
-                    }
-                } else {
-                    tray.dismiss_if_outside();
-                }
-                std::ptr::from_ref(event).cast_mut()
-            })
-            .unwrap_or(event.as_ptr())
-        });
-        let monitors = [
-            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mouse, &global),
-            unsafe {
-                NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-                    mouse | NSEventMask::KeyDown,
-                    &local,
-                )
-            },
-        ];
-        self.ivars()
-            .mouse_monitors
-            .replace(monitors.into_iter().flatten().collect());
-    }
-
-    fn dismiss_if_outside(&self) {
-        let outside = self.ivars().panel_open.get()
-            && self
-                .ivars()
-                .panel
-                .borrow()
-                .as_ref()
-                .is_some_and(|panel| !panel.contains_pointer());
-        if outside {
-            self.cancel_panel();
-        }
-    }
-
-    fn hide_panel(&self) {
-        if !self.ivars().panel_open.replace(false) {
-            return;
-        }
-        for monitor in self.ivars().mouse_monitors.take() {
-            // The tokens were returned by NSEvent's monitor registration.
-            unsafe { NSEvent::removeMonitor(&monitor) };
-        }
-        if let Some(panel) = self.ivars().panel.borrow().as_ref() {
-            panel.hide();
-        }
-    }
-
-    fn cancel_panel(&self) {
-        let session = self.ivars().session.take();
-        self.hide_panel();
-        if let Some(session) = session {
-            // The session is received from NSStatusItem on macOS 27.
-            let _: () = unsafe { msg_send![&*session, cancel] };
-        }
-    }
-
-    fn render_panel(&self) {
-        if !self.ivars().panel_open.get() {
-            return;
-        }
-        let app = &self.ivars().handle;
-        let data = crate::tray_menu_data(&app.state::<crate::AppState>());
-        let entries = crate::tray_menu_entries(app, &data);
-        if let Some(panel) = self.ivars().panel.borrow_mut().as_mut() {
-            panel.render(&entries, &data.rows, self, MainThreadMarker::from(self));
-        }
-    }
-
     fn is_root(&self, menu: &NSMenu) -> bool {
         self.ivars()
             .item
@@ -1010,18 +843,12 @@ impl StatusMenu {
             .is_some_and(|root| std::ptr::eq(&*root, menu))
     }
 
-    fn rebuild(&self) {
-        if self.ivars().panel.borrow().is_some() {
-            self.render_panel();
-            return;
-        }
+    fn rebuild(&self, entries: Vec<Entry>, data: TrayMenuData) {
         if self.ivars().tracking.get() {
-            self.ivars().needs_rebuild.set(true);
+            self.ivars().pending_menu.replace(Some((entries, data)));
             return;
         }
-        let app = &self.ivars().handle;
-        let data = crate::tray_menu_data(&app.state::<crate::AppState>());
-        let entries = crate::tray_menu_entries(app, &data);
+        self.ivars().pending_menu.take();
         let root = build_native_menu("", &entries, self);
         update_node_rows(&root, &data.title, &data.rows, data.testing);
         // Leave the menu attached even while closed. AppKit can track it from
@@ -1067,7 +894,7 @@ fn build_native_menu(title: &str, entries: &[Entry], target: &StatusMenu) -> Ret
     for entry in entries {
         let item = match entry {
             Entry::Separator => NSMenuItem::separatorItem(mtm),
-            Entry::Submenu(_, title, children) => {
+            Entry::Submenu(title, children) => {
                 let item = NSMenuItem::new(mtm);
                 item.setTitle(&NSString::from_str(title));
                 item.setSubmenu(Some(&build_native_menu(title, children, target)));
@@ -1109,6 +936,35 @@ fn build_native_menu(title: &str, entries: &[Entry], target: &StatusMenu) -> Ret
 }
 
 pub fn install(handle: &AppHandle) -> std::io::Result<()> {
+    match tray_helper::start(handle) {
+        Ok(Some(helper)) => {
+            handle.manage(helper);
+        }
+        Ok(None) => install_in_process(handle)?,
+        Err(error) => {
+            eprintln!("could not start native tray process: {error}");
+            install_in_process(handle)?;
+        }
+    }
+    refresh_menu(handle);
+    Ok(())
+}
+
+fn install_in_process(handle: &AppHandle) -> std::io::Result<()> {
+    let handle = handle.clone();
+    install_native(move |event| tray_helper::dispatch(&handle, event))
+}
+
+pub(crate) fn helper_stopped(handle: &AppHandle) {
+    if let Err(error) = install_in_process(handle) {
+        eprintln!("could not restore native status item: {error}");
+        return;
+    }
+    refresh_menu(handle);
+    crate::sync_tray_traffic(handle);
+}
+
+pub(crate) fn install_native(dispatch: impl Fn(Event) + 'static) -> std::io::Result<()> {
     let mtm = MainThreadMarker::new().expect("tray setup runs on the main thread");
     let image = NSImage::initWithData(
         NSImage::alloc(),
@@ -1126,30 +982,14 @@ pub fn install(handle: &AppHandle) -> std::io::Result<()> {
     button.setImage(Some(&image));
     button.setImagePosition(NSCellImagePosition::ImageLeft);
     button.setToolTip(Some(&NSString::from_str("Crossbow")));
-    let uses_expanded_interface =
-        item.respondsToSelector(objc2::sel!(setExpandedInterfaceDelegate:));
     let tray = StatusMenu::alloc(mtm).set_ivars(StatusMenuState {
-        handle: handle.clone(),
+        dispatch: Box::new(dispatch),
         item,
         tracking: Cell::new(false),
-        needs_rebuild: Cell::new(false),
+        pending_menu: RefCell::new(None),
         speed: RefCell::new(String::new()),
-        panel: RefCell::new(uses_expanded_interface.then(|| TrayPanel::new(mtm))),
-        session: RefCell::new(None),
-        panel_open: Cell::new(false),
-        mouse_monitors: RefCell::new(Vec::new()),
     });
     let tray: Retained<StatusMenu> = unsafe { msg_send![super(tray), init] };
-    if uses_expanded_interface {
-        // objc2's AppKit bindings predate this selector. Only send it when
-        // the running AppKit supports it.
-        let _: () = unsafe { msg_send![&*tray.ivars().item, setExpandedInterfaceDelegate: &*tray] };
-        unsafe {
-            button.setTarget(Some(&tray));
-            button.setAction(Some(objc2::sel!(trayRightClick:)));
-        }
-        button.sendActionOn(NSEventMask::RightMouseUp);
-    }
     STATUS_MENU.with(|slot| {
         if let Err(tray) = slot.set(tray) {
             bar.removeStatusItem(&tray.ivars().item);
@@ -1159,13 +999,45 @@ pub fn install(handle: &AppHandle) -> std::io::Result<()> {
         }
         Ok(())
     })?;
-    with_status_menu(StatusMenu::rebuild);
     Ok(())
 }
 
 pub fn refresh_menu(handle: &AppHandle) {
-    let _ = handle.run_on_main_thread(|| {
-        with_status_menu(StatusMenu::rebuild);
+    let data = crate::tray_menu_data(&handle.state::<crate::AppState>());
+    let entries = crate::tray_menu_entries(handle, &data);
+    send(handle, Command::Menu(entries, data));
+}
+
+fn send(handle: &AppHandle, command: Command) {
+    let command = match handle.try_state::<tray_helper::Helper>() {
+        Some(helper) => match helper.send(command) {
+            Ok(()) => return,
+            Err(command) => command,
+        },
+        None => command,
+    };
+    let _ = handle.run_on_main_thread(move || apply_command(command));
+}
+
+pub(crate) fn apply_command(command: Command) {
+    with_status_menu(|tray| match command {
+        Command::Menu(entries, data) => tray.rebuild(entries, data),
+        Command::Nodes(data) => {
+            if !update_status_node_rows(tray, &data.title, &data.rows, data.testing) {
+                (tray.ivars().dispatch)(Event::RefreshMenu);
+            }
+        }
+        Command::Speed(text) => {
+            let state = tray.ivars();
+            if *state.speed.borrow() != text {
+                let show = !text.is_empty();
+                if !show {
+                    state.item.setLength(NS_VARIABLE_LENGTH);
+                }
+                apply(&state.item, &text, show);
+                state.speed.replace(text);
+            }
+        }
     });
 }
 
@@ -1212,6 +1084,18 @@ pub fn update_node_menu(
     rows: &[TrayNodeRow],
     testing: bool,
 ) -> bool {
+    if let Some(helper) = handle.try_state::<tray_helper::Helper>() {
+        if helper
+            .send(Command::Nodes(TrayMenuData {
+                title: title.to_owned(),
+                rows: rows.to_vec(),
+                testing,
+            }))
+            .is_ok()
+        {
+            return true;
+        }
+    }
     if MainThreadMarker::new().is_some() {
         return with_status_menu(|tray| update_status_node_rows(tray, title, rows, testing))
             .unwrap_or(false);
@@ -1239,10 +1123,6 @@ fn update_status_node_rows(
     rows: &[TrayNodeRow],
     testing: bool,
 ) -> bool {
-    if tray.ivars().panel.borrow().is_some() {
-        tray.render_panel();
-        return true;
-    }
     tray.ivars()
         .item
         .menu(MainThreadMarker::from(tray))

@@ -1,5 +1,6 @@
 //! Shared tray menu entries; AppKit owns the status item on macOS.
 
+#[cfg_attr(target_os = "macos", derive(serde::Deserialize, serde::Serialize))]
 pub(crate) enum Entry {
     Action {
         id: String,
@@ -7,7 +8,7 @@ pub(crate) enum Entry {
         enabled: bool,
         checked: Option<bool>,
     },
-    Submenu(#[cfg(target_os = "macos")] &'static str, String, Vec<Entry>),
+    Submenu(String, Vec<Entry>),
     Separator,
 }
 

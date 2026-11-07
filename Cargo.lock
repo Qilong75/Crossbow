@@ -892,10 +892,10 @@ dependencies = [
 name = "crossbow-desktop"
 version = "0.13.7"
 dependencies = [
- "block2",
  "crossbow-core",
  "crossbow-service",
  "dbus",
+ "dispatch2",
  "flate2",
  "libc",
  "objc2",

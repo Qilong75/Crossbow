@@ -40,7 +40,7 @@ mod tray_speed;
 mod tray_state;
 mod tray_menu;
 #[cfg(target_os = "macos")]
-mod tray_panel;
+mod tray_helper;
 #[cfg(target_os = "macos")]
 mod tun;
 #[cfg(windows)]
@@ -3135,8 +3135,6 @@ fn tray_menu_entries(
         )
     );
     let mode_menu = Entry::Submenu(
-        #[cfg(target_os = "macos")]
-        "mode",
         mode_label,
         vec![
             Entry::check("mode-direct", tr(&lang, "直连", "Direct"), mode == "direct"),
@@ -3153,8 +3151,6 @@ fn tray_menu_entries(
         )
     };
     let profile_menu = Entry::Submenu(
-        #[cfg(target_os = "macos")]
-        "profiles",
         tr(&lang, "配置", "Profiles"),
         profiles.iter().map(|profile| {
             Entry::check(
@@ -3184,7 +3180,7 @@ fn tray_menu_entries(
             nodes.extend(data.rows.iter().map(|row| {
                 Entry::check(format!("node-{}", row.name), row.label.clone(), row.selected)
             }));
-            entries.push(Entry::Submenu("nodes", tray_speed::format_flag_spacing(&data.title), nodes));
+            entries.push(Entry::Submenu(tray_speed::format_flag_spacing(&data.title), nodes));
         }
     }
     entries.extend([profile_menu, Entry::Separator]);
@@ -3573,6 +3569,14 @@ fn is_elevated() -> bool {
 }
 
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(tray_helper::ARG)) {
+        if let Err(error) = tray_helper::run() {
+            eprintln!("macOS tray helper: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(target_os = "windows")]
     deelevate_if_needed();
     tauri::Builder::default()
