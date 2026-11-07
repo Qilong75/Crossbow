@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import logoGlyph from "./assets/logo-glyph.png";
 import logoGlyphDark from "./assets/logo-glyph-dark.png";
 import { usePreferences } from "./preferences";
@@ -37,6 +39,84 @@ export function DownloadIcon() {
     >
       <path d="M12 3v12M6 9l6 6 6-6M4 21h16" />
     </svg>
+  );
+}
+
+function LinkIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+    </svg>
+  );
+}
+
+/** 章节锚点链接（#349）：HashRouter 下携带 /route#id 的可分享链接；
+ *  目标与当前地址完全相同时阻止默认导航并强制重新滚动。 */
+export function AnchorLink({
+  to,
+  className,
+  children,
+}: {
+  to: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const { pathname, hash } = useLocation();
+  const hashStart = to.indexOf("#");
+  const same =
+    pathname === to.slice(0, hashStart) && hash === to.slice(hashStart);
+  return (
+    <Link
+      to={to}
+      className={className}
+      aria-current={same ? "location" : undefined}
+      onClick={(event) => {
+        if (!same) return; // 路由切换后由 App 的 hash 效果负责滚动
+        event.preventDefault();
+        document
+          .getElementById(to.slice(hashStart + 1))
+          ?.scrollIntoView({ block: "start", behavior: "smooth" });
+      }}
+    >
+      {children}
+    </Link>
+  );
+}
+
+/** 章节标题旁的复制链接按钮（#349）：复制 /route#id 形式的完整分享地址。 */
+export function CopyLinkButton({ to }: { to: string }) {
+  const { t } = usePreferences();
+  const [copied, setCopied] = useState(false);
+  const write = () => {
+    const share = `${location.origin}${location.pathname}#${to}`;
+    navigator.clipboard?.writeText(share).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      },
+      () => {},
+    );
+  };
+  return (
+    <button
+      className="anchor-button"
+      onClick={write}
+      title={t(copied ? "已复制链接" : "复制章节链接")}
+      aria-label={t(copied ? "已复制链接" : "复制章节链接")}
+    >
+      {copied ? "✓" : <LinkIcon />}
+    </button>
   );
 }
 
