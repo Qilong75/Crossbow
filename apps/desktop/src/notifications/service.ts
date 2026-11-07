@@ -109,6 +109,10 @@ const copy = {
   "core.recovered": ["内核已恢复运行", "Core is running again"],
   "core.safeMode": ["已进入安全模式", "Safe mode enabled"],
   "tun.disabled": ["TUN 已自动关闭", "TUN turned off automatically"],
+  "sysproxy.coreDead": [
+    "内核未运行，已关闭系统代理",
+    "Core is down; system proxy turned off",
+  ],
   "tun.takeoverGiveUp": [
     "TUN 接管异常，已停止自动恢复",
     "TUN takeover abnormal; auto-recovery paused",
