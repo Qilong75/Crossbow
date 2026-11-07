@@ -6,7 +6,7 @@ mihomo 与 sing-box 双内核。它把订阅、节点选择、系统代理、TUN
 
 <img width="1029" height="719" alt="image" src="https://github.com/user-attachments/assets/88879463-6eb9-47a6-90e2-81ea7cea58b8" />
 
-**当前版本：** [v0.13.7](https://github.com/Richard-Zhang1019/Crossbow/releases/tag/v0.13.7)。
+**当前版本：** [v0.13.8](https://github.com/Richard-Zhang1019/Crossbow/releases/tag/v0.13.8)。
 提供 macOS Apple Silicon DMG、Windows x64 安装包和 Linux x86_64 实验性压缩包。
 Windows 版持续完善中，TUN 使用安装包附带的受控服务；实机兼容性问题请附版本、通知详情与诊断结果提交 Issue。
 
@@ -19,9 +19,9 @@ Linux 发布包附带桌面程序、mihomo 和可选 TUN 服务安装脚本；�
 
 | 平台 | 安装包 | 说明 |
 |---|---|---|
-| macOS Apple Silicon | [下载 DMG](https://github.com/Richard-Zhang1019/Crossbow/releases/download/v0.13.7/Crossbow_0.13.7_aarch64.dmg) | 拖入「应用程序」后启动；Developer ID 签名与公证 |
-| Windows x64 | [下载安装程序](https://github.com/Richard-Zhang1019/Crossbow/releases/download/v0.13.7/Crossbow_0.13.7_x64-setup.exe) | 安装后启动；尚无 Windows 代码签名，请核对官方来源及校验文件 |
-| Linux x86_64（实验性） | [下载 tar.gz](https://github.com/Richard-Zhang1019/Crossbow/releases/download/v0.13.7/Crossbow_0.13.7_linux_x86_64.tar.gz) | 解压后以普通用户运行 `run.sh`；依赖及 TUN 安装见包内 `README.txt` |
+| macOS Apple Silicon | [下载 DMG](https://github.com/Richard-Zhang1019/Crossbow/releases/download/v0.13.8/Crossbow_0.13.8_aarch64.dmg) | 拖入「应用程序」后启动；Developer ID 签名与公证 |
+| Windows x64 | [下载安装程序](https://github.com/Richard-Zhang1019/Crossbow/releases/download/v0.13.8/Crossbow_0.13.8_x64-setup.exe) | 安装后启动；尚无 Windows 代码签名，请核对官方来源及校验文件 |
+| Linux x86_64（实验性） | [下载 tar.gz](https://github.com/Richard-Zhang1019/Crossbow/releases/download/v0.13.8/Crossbow_0.13.8_linux_x86_64.tar.gz) | 解压后以普通用户运行 `run.sh`；依赖及 TUN 安装见包内 `README.txt` |
 
 下载与更新内容以 [GitHub Releases](https://github.com/Richard-Zhang1019/Crossbow/releases/latest) 为准；
 应用内可在「设置 → 软件更新」检查更新，下载后请按界面提示完成安装。
@@ -32,7 +32,7 @@ Linux 发布包附带桌面程序、mihomo 和可选 TUN 服务安装脚本；�
 3. 本应用的 TUN 与系统代理可同时开启、独立控制；TUN 首次开启需要管理员授权。
    请先关闭其他代理或 VPN 的 TUN，避免路由冲突。
 
-v0.13.7 新增 TUN 健康自检（栈僵死自动优雅重启内核恢复联网）并注入域名嗅探，DNS 污染解析不再导致证书不匹配或间歇超时。
+v0.13.8 修复 Windows 服务内核超时后无法再次启动的竞态，新增系统代理残留双层自愈与 panic 日志落盘；macOS 全屏下托盘菜单可用；官网新增平台支持矩阵与快速开始指南。
 Windows GUI 与真实网络仍需实机验收，步骤见
 [Windows 测试说明](docs/WINDOWS-TESTING.md)。显式代理能访问而浏览器不能访问时，请检查浏览器是否使用系统代理。
 
