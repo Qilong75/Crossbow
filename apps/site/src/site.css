@@ -167,6 +167,7 @@ main:focus { outline: none; }
 .section-nav { display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 16px 24px; background: var(--surface); border-radius: 8px; }
 .section-nav button { background: none; border: none; min-height: 40px; font-size: 14px; }
 .detail-section { display: grid; grid-template-columns: 1fr 1.2fr; gap: 80px; padding-block: 48px; }
+.detail-section.wide { grid-template-columns: 1fr; gap: 20px; }
 .detail-section h2 { font-size: 30px; margin-bottom: 16px; }
 .detail-section p { color: var(--dim); font-size: 16px; }
 .detail-section ul { padding-left: 20px; color: var(--dim); display: grid; gap: 16px; }
@@ -315,13 +316,21 @@ h2:hover .anchor-button, .anchor-button:focus-visible { opacity: 1; }
 .guide-toc-group h2 { font-size: 13px; font-weight: 600; color: var(--dim); letter-spacing: .04em; margin-bottom: 6px; }
 .guide-toc-group a { min-height: 30px; display: flex; align-items: center; color: var(--dim); font-size: 14px; border-radius: 6px; }
 .guide-toc-group a:hover { color: var(--accent); }
-.matrix-scroll { overflow-x: auto; min-width: 0; }
+.matrix-scroll { overflow-x: auto; min-width: 0; padding-bottom: 4px; }
 .support-matrix { display: block; }
 .support-matrix table { width: 100%; border-collapse: collapse; font-size: 14px; }
-.support-matrix th, .support-matrix td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
-.support-matrix thead th { background: var(--surface-2); white-space: nowrap; }
+.support-matrix th, .support-matrix td { border: 0; border-bottom: 1px solid var(--line); padding: 13px 16px; text-align: left; vertical-align: top; }
+.support-matrix thead th { border-bottom: 2px solid var(--line-strong); font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.support-matrix thead th .th-sub { display: block; margin-top: 2px; font-size: 12px; font-weight: 400; color: var(--dim); }
 .support-matrix tbody th { white-space: nowrap; color: var(--text); }
+.support-matrix tbody td { color: var(--dim); }
+.support-matrix .cell-yes { color: var(--text); font-weight: 500; }
+.support-matrix .cell-no { color: var(--dim); }
+.support-matrix .cell-na { color: var(--dim); opacity: .6; }
 .support-matrix .matrix-note { margin-top: 12px; font-size: 13px; color: var(--dim); }
+@media (max-width: 700px) {
+  .support-matrix thead th:first-child, .support-matrix tbody th { position: sticky; left: 0; background: var(--bg); }
+}
 .download-state { color: var(--dim); font-size: 14px; }
 .download-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-size: 14px; color: var(--dim); }
 .download-retry { min-height: 36px; padding: 0 8px; border: 0; background: none; color: var(--accent); cursor: pointer; font-size: 14px; text-decoration: underline; text-underline-offset: 4px; }

@@ -216,18 +216,18 @@ export default function FeaturesPage() {
   return <div className="shell detail-page">
     <header className="page-heading"><h1>{t("功能详解")}</h1><p>{t("从订阅与节点，到接管与观测。了解每一步连接由什么组成。")}</p></header>
     <nav className="section-nav" aria-label={t("功能目录")}>{FEATURES.map((f) => <AnchorLink key={f.id} to={`/features#${f.id}`} className={active === f.id ? "section-link active" : "section-link"}>{f.tag}</AnchorLink>)}</nav>
-    <div className="detail-list">{FEATURES.map((f) => <section className="detail-section" id={f.id} key={f.title}>
+    <div className="detail-list">{FEATURES.map((f) => <section className={"detail-section" + (f.matrix ? " wide support-matrix" : "")} id={f.id} key={f.title}>
       <div><h2>{f.title}<CopyLinkButton to={`/features#${f.id}`} /></h2><p>{f.summary}</p></div>
       {f.matrix ? (
         <div className="matrix-scroll">
           <table>
-            <thead><tr><th scope="col">{t("能力")}</th><th scope="col">macOS (Apple Silicon)</th><th scope="col">Windows x64</th><th scope="col">Linux x86_64（实验）</th><th scope="col">iOS</th></tr></thead>
+            <thead><tr><th scope="col">{t("能力")}</th><th scope="col">macOS<span className="th-sub">Apple Silicon</span></th><th scope="col">Windows<span className="th-sub">x64</span></th><th scope="col">Linux<span className="th-sub">x86_64 · {t("社区实验")}</span></th><th scope="col">iOS<span className="th-sub">{t("开发验证中")}</span></th></tr></thead>
             <tbody>
               <tr><th scope="row">{t("安装包")}</th><td>DMG · {t("签名与公证")}</td><td>EXE · {t("未签名")}</td><td>TAR.GZ · {t("社区归档")}</td><td>{t("暂未公开分发")}</td></tr>
-              <tr><th scope="row">{t("系统代理")}</th><td>✓ {t("自动快照与还原")}</td><td>✓ {t("自动快照与还原")}</td><td>✗ {t("手动配置")}</td><td>—</td></tr>
-              <tr><th scope="row">{t("TUN 模式")}</th><td>✓ {t("管理员授权")}</td><td>✓ {t("系统服务承载")}</td><td>{t("实验性 systemd / polkit 服务")}</td><td>—</td></tr>
-              <tr><th scope="row">{t("双内核切换")}</th><td>✓</td><td>✓</td><td>✓</td><td>—</td></tr>
-              <tr><th scope="row">{t("应用内自动更新")}</th><td>✓</td><td>✓</td><td>✗ {t("手动下载")}</td><td>—</td></tr>
+              <tr><th scope="row">{t("系统代理")}</th><td><span className="cell-yes">✓ {t("自动快照与还原")}</span></td><td><span className="cell-yes">✓ {t("自动快照与还原")}</span></td><td><span className="cell-no">✗ {t("手动配置")}</span></td><td><span className="cell-na">—</span></td></tr>
+              <tr><th scope="row">{t("TUN 模式")}</th><td><span className="cell-yes">✓ {t("管理员授权")}</span></td><td><span className="cell-yes">✓ {t("系统服务承载")}</span></td><td>{t("实验性 systemd / polkit 服务")}</td><td><span className="cell-na">—</span></td></tr>
+              <tr><th scope="row">{t("双内核切换")}</th><td><span className="cell-yes">✓</span></td><td><span className="cell-yes">✓</span></td><td><span className="cell-yes">✓</span></td><td><span className="cell-na">—</span></td></tr>
+              <tr><th scope="row">{t("应用内自动更新")}</th><td><span className="cell-yes">✓</span></td><td><span className="cell-yes">✓</span></td><td><span className="cell-no">✗ {t("手动下载")}</span></td><td><span className="cell-na">—</span></td></tr>
               <tr><th scope="row">{t("当前状态")}</th><td>{t("正式支持")}</td><td>{t("正式支持")}</td><td>{t("社区实验")}</td><td>{t("开发验证中")}</td></tr>
             </tbody>
           </table>
