@@ -137,7 +137,8 @@ main:focus { outline: none; }
 .download-platform .platform-guide { font-size: 13px; min-height: 44px; margin-top: 8px; }
 .community-note { margin-top: 40px; padding-block: 24px; color: var(--dim); font-size: 14px; text-align: center; }
 .community-note a, .guide-card a { color: var(--accent); text-decoration: underline; text-underline-offset: 4px; }
-.guide-card { scroll-margin-top: 0; }
+/* P1（#349）：sticky 导航高 80px，目标统一预留定位高度，跳转后标题不被遮挡 */
+.guide-card, .detail-section { scroll-margin-top: 96px; }
 .guide-intro { margin-top: 12px; color: var(--dim); font-size: 15px; }
 .release-scope { margin-top: 24px; padding-top: 20px; font-size: 14px; color: var(--dim); }
 .download-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px 24px; color: var(--dim); font-size: 14px; margin-top: 24px; }
@@ -166,6 +167,7 @@ main:focus { outline: none; }
 .section-nav { display: flex; flex-wrap: wrap; gap: 12px 24px; padding: 16px 24px; background: var(--surface); border-radius: 8px; }
 .section-nav button { background: none; border: none; min-height: 40px; font-size: 14px; }
 .detail-section { display: grid; grid-template-columns: 1fr 1.2fr; gap: 80px; padding-block: 48px; }
+.detail-section.wide { grid-template-columns: 1fr; gap: 20px; }
 .detail-section h2 { font-size: 30px; margin-bottom: 16px; }
 .detail-section p { color: var(--dim); font-size: 16px; }
 .detail-section ul { padding-left: 20px; color: var(--dim); display: grid; gap: 16px; }
@@ -303,3 +305,35 @@ main:focus { outline: none; }
 }
 
 @media (max-width:360px) { :root { --gutter:16px; } .flow-stage { --node-width:68px; --flow-gap:6px; } .hero h1 { font-size:32px; } }
+
+/* P1（#349）：目录、锚点、支持矩阵与下载状态 */
+.section-nav a { display: inline-flex; align-items: center; min-height: 40px; padding: 7px 16px; font-size: 14px; border-radius: 7px; color: var(--dim); white-space: nowrap; }
+.section-nav a.active { color: var(--text); background: var(--surface-2); font-weight: 600; }
+.anchor-button { width: 28px; height: 28px; margin-left: 10px; padding: 0; display: inline-flex; align-items: center; justify-content: center; vertical-align: middle; border: 0; border-radius: 6px; background: transparent; color: var(--dim); opacity: 0; transition: opacity 120ms ease; cursor: pointer; }
+h2:hover .anchor-button, .anchor-button:focus-visible { opacity: 1; }
+.guide-toc { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px 32px; padding: 20px 24px; background: var(--surface); border-radius: 8px; }
+.guide-toc-group { display: grid; gap: 2px; align-content: start; }
+.guide-toc-group h2 { font-size: 13px; font-weight: 600; color: var(--dim); letter-spacing: .04em; margin-bottom: 6px; }
+.guide-toc-group a { min-height: 30px; display: flex; align-items: center; color: var(--dim); font-size: 14px; border-radius: 6px; }
+.guide-toc-group a:hover { color: var(--accent); }
+.matrix-scroll { overflow-x: auto; min-width: 0; padding-bottom: 4px; }
+.support-matrix { display: block; }
+.support-matrix table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.support-matrix th, .support-matrix td { border: 0; border-bottom: 1px solid var(--line); padding: 13px 16px; text-align: left; vertical-align: top; }
+.support-matrix thead th { border-bottom: 2px solid var(--line-strong); font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.support-matrix thead th .th-sub { display: block; margin-top: 2px; font-size: 12px; font-weight: 400; color: var(--dim); }
+.support-matrix tbody th { white-space: nowrap; color: var(--text); }
+.support-matrix tbody td { color: var(--dim); }
+.support-matrix .cell-yes { color: var(--text); font-weight: 500; }
+.support-matrix .cell-no { color: var(--dim); }
+.support-matrix .cell-na { color: var(--dim); opacity: .6; }
+.support-matrix .matrix-note { margin-top: 12px; font-size: 13px; color: var(--dim); }
+@media (max-width: 700px) {
+  .support-matrix thead th:first-child, .support-matrix tbody th { position: sticky; left: 0; background: var(--bg); }
+}
+.download-state { color: var(--dim); font-size: 14px; }
+.download-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); font-size: 14px; color: var(--dim); }
+.download-retry { min-height: 36px; padding: 0 8px; border: 0; background: none; color: var(--accent); cursor: pointer; font-size: 14px; text-decoration: underline; text-underline-offset: 4px; }
+.platform-badge { align-self: flex-start; margin-top: 8px; padding: 3px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600; }
+.download-platform.recommended { border-color: var(--accent); }
+@media (max-width: 900px) { .guide-toc { grid-template-columns: 1fr; } }
