@@ -109,12 +109,12 @@ export default function DownloadCards({ lang }: { lang: Lang }) {
   })();
 
   const platforms = [
-    { name: "macOS", detail: _("Apple Silicon · M 系列芯片"), url: release?.dmgUrl, label: _("下载 DMG"), note: _("Developer ID 签名与公证；拖入应用程序后启动。") },
-    { name: "Windows", detail: "x64 · Windows 11", url: release?.windowsUrl, label: _("下载 EXE"), note: _("尚无 Windows 代码签名；请核对官方来源及发布页中的 SHA256SUMS。") },
-    { name: "Linux", detail: _("x86_64 · 社区实验版"), url: release?.linuxUrl, label: _("下载 TAR.GZ"), note: _("已在 CachyOS / niri 环境验证部分功能。解压后以普通用户运行；代理需手动配置，TUN 需另装服务。") },
+    { name: "macOS", detail: _("Apple Silicon（M 系列芯片）"), url: release?.dmgUrl, label: _("下载 DMG"), note: _("Developer ID 签名与公证；拖入应用程序后启动。") },
+    { name: "Windows", detail: "x64 (Windows 11)", url: release?.windowsUrl, label: _("下载 EXE"), note: _("尚无 Windows 代码签名；请核对官方来源及发布页中的 SHA256SUMS。") },
+    { name: "Linux", detail: _("x86_64（社区实验版）"), url: release?.linuxUrl, label: _("下载 TAR.GZ"), note: _("已在 CachyOS / niri 环境验证部分功能。解压后以普通用户运行；代理需手动配置，TUN 需另装服务。") },
   ];
   const headline = release
-    ? `${release.version}${release.date ? ` · ${release.date}` : ""} · ${_("macOS / Windows 支持应用内更新；Linux 实验版手动下载")}`
+    ? `${release.version}${release.date ? `（${release.date}）` : ""}，${_("macOS / Windows 支持应用内更新；Linux 实验版手动下载")}`
     : status === "loading"
       ? _("正在获取最新版本…")
       : _("版本信息获取失败");

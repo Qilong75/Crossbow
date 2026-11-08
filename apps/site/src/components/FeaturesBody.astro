@@ -196,11 +196,11 @@ const path = (id: string) => `${import.meta.env.BASE_URL.replace(/\/+$/, "")}${l
                 <th scope="col">{_("能力")}</th>
                 <th scope="col">macOS<span class="th-sub">Apple Silicon</span></th>
                 <th scope="col">Windows<span class="th-sub">x64</span></th>
-                <th scope="col">Linux<span class="th-sub">x86_64 · {_("社区实验")}</span></th>
+                <th scope="col">Linux<span class="th-sub">x86_64（{_("社区实验")}）</span></th>
                 <th scope="col">iOS<span class="th-sub">{_("开发验证中")}</span></th>
               </tr></thead>
               <tbody>
-                <tr><th scope="row">{_("安装包")}</th><td>DMG · {_("签名与公证")}</td><td>EXE · {_("未签名")}</td><td>TAR.GZ · {_("社区归档")}</td><td>{_("暂未公开分发")}</td></tr>
+                <tr><th scope="row">{_("安装包")}</th><td>DMG（{_("签名与公证")}）</td><td>EXE（{_("未签名")}）</td><td>TAR.GZ（{_("社区归档")}）</td><td>{_("暂未公开分发")}</td></tr>
                 <tr><th scope="row">{_("系统代理")}</th><td><span class="cell-yes">✓ {_("自动快照与还原")}</span></td><td><span class="cell-yes">✓ {_("自动快照与还原")}</span></td><td><span class="cell-no">✗ {_("手动配置")}</span></td><td><span class="cell-na">—</span></td></tr>
                 <tr><th scope="row">{_("TUN 模式")}</th><td><span class="cell-yes">✓ {_("管理员授权")}</span></td><td><span class="cell-yes">✓ {_("系统服务承载")}</span></td><td>{_("实验性 systemd / polkit 服务")}</td><td><span class="cell-na">—</span></td></tr>
                 <tr><th scope="row">{_("双内核切换")}</th><td><span class="cell-yes">✓</span></td><td><span class="cell-yes">✓</span></td><td><span class="cell-yes">✓</span></td><td><span class="cell-na">—</span></td></tr>
