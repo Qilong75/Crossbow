@@ -28,7 +28,6 @@ export const english = {
   "已在 CachyOS / niri 环境验证部分功能。解压后以普通用户运行；代理需手动配置，TUN 需另装服务。": "Some features have been tested on CachyOS / niri. Extract and run as a regular user. Configure the proxy manually; TUN needs an optional service.",
   "下载 Crossbow": "Download Crossbow",
   "macOS / Windows 支持应用内更新；Linux 实验版手动下载": "In-app updates on macOS / Windows; manual downloads for the Linux preview",
-  "查看发布与下载": "View release & downloads",
   "Linux 安装与支持范围 →": "Linux installation & support →",
   "更新说明 ↗": "Release notes ↗",
   "iOS 正在真机开发验证中，暂未公开分发。安装或连接遇到问题，可先查看": "iOS is being tested on physical devices and is not publicly available yet. For installation or connection help, read the ",
