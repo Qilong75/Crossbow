@@ -24,6 +24,7 @@ Linux 发布包附带桌面程序、mihomo 和可选 TUN 服务安装脚本；�
 | Linux x86_64（实验性） | [下载 tar.gz](https://github.com/Richard-Zhang1019/Crossbow/releases/download/v0.13.8/Crossbow_0.13.8_linux_x86_64.tar.gz) | 解压后以普通用户运行 `run.sh`；依赖及 TUN 安装见包内 `README.txt` |
 
 下载与更新内容以 [GitHub Releases](https://github.com/Richard-Zhang1019/Crossbow/releases/latest) 为准；
+第三方组件与许可声明见 [THIRD-PARTY-NOTICES](docs/THIRD-PARTY-NOTICES.md)；
 应用内可在「设置 → 软件更新」检查更新，下载后请按界面提示完成安装。
 发布文件附有 `SHA256SUMS`；`main` 可能包含尚未发布的改动。
 
