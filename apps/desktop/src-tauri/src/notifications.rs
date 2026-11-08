@@ -52,6 +52,7 @@ pub enum Action {
     Diagnostics,
     Logs,
     Profiles,
+    Nodes,
     #[serde(rename = "retryDownload")]
     RetryDownload,
 }
@@ -863,6 +864,7 @@ pub async fn notification_action(
         Action::Diagnostics => "diagnostics",
         Action::Logs => "logs",
         Action::Profiles => "profiles",
+        Action::Nodes => "proxies",
         Action::RetryDownload => unreachable!(),
     };
     {
