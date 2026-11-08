@@ -151,16 +151,37 @@ const FEATURES = [
   },
 ];
 
+// 四组归类（#365）：锚点 id 保持稳定，外链不漂移
+const GROUPS: { label: string; ids: string[] }[] = [
+  { label: _("管理配置"), ids: ["nodes", "subscription", "preferences"] },
+  { label: _("连接接管"), ids: ["sysproxy-guard", "tun", "engines", "js-override"] },
+  { label: _("观测排障"), ids: ["diagnostics", "observability", "notifications"] },
+  { label: _("维护恢复"), ids: ["lightweight", "snapshots", "updates", "linux"] },
+];
+const byId = Object.fromEntries(FEATURES.map((f) => [f.id, f]));
+const groupLabel = (id: string) => GROUPS.find((g) => g.ids.includes(id))?.label ?? "";
+
 const path = (id: string) => `${import.meta.env.BASE_URL.replace(/\/+$/, "")}${lang === "en" ? "/en" : ""}/features#${id}`;
 ---
 
 <div class="shell detail-page">
   <header class="page-heading"><h1>{_("功能详解")}</h1><p>{_("从订阅与节点，到接管与观测。了解每一步连接由什么组成。")}</p></header>
   <nav class="section-nav" aria-label={_("功能目录")}>
-    {FEATURES.map((f) => <a href={path(f.id)} class="section-link" data-section={f.id}>{f.tag}</a>)}
+    <a href={path("support-matrix")} class="section-link" data-section="support-matrix">{_("支持矩阵")}</a>
+    {GROUPS.map((g) => (
+      <div class="nav-group">
+        <span class="nav-group-label">{g.label}</span>
+        {g.ids.map((id) => <a href={path(id)} class="section-link" data-section={id}>{byId[id].tag}</a>)}
+      </div>
+    ))}
   </nav>
   <div class="detail-list">
-    {FEATURES.map((f) => (
+    {FEATURES.map((f, i) => (
+      <>
+        {i > 0 && groupLabel(f.id) !== groupLabel(FEATURES[i - 1].id) && (
+          <div class="detail-group" aria-hidden="true">{groupLabel(f.id)}</div>
+        )}
+
       <section class={"detail-section" + (f.matrix ? " wide support-matrix" : "")} id={f.id}>
         <div>
           <h2>{f.title}<button class="anchor-button" data-copy={path(f.id)} title={_("复制章节链接")} aria-label={_("复制章节链接")}>
@@ -193,6 +214,7 @@ const path = (id: string) => `${import.meta.env.BASE_URL.replace(/\/+$/, "")}${l
           <ul>{f.detail.map((d) => <li>{d}</li>)}</ul>
         )}
       </section>
+      </>
     ))}
   </div>
   <div class="page-next">

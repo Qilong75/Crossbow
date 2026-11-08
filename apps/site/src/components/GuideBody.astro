@@ -112,7 +112,14 @@ const TOC = [
     <section class="guide-card" id="override">
       <h2>{_("JS 覆写：把订阅改成你想要的样子")}<button class="anchor-button" data-copy={route("/guide#override")} title={_("复制章节链接")} aria-label={_("复制章节链接")}><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></svg></button></h2>
       <p style="color: var(--dim); font-size: 15; line-height: 1.75; margin: 10px 0 4px">{_("配置 → 覆写链 → 新建覆写 → 选择「JS 脚本」，编写")} <code style="font: 12px var(--mono)">function main(config)</code>{_("， 返回改造后的配置。沙箱执行、无网络无文件副作用，保存时自动试运行。")}</p>
-      <pre class="code-block"><code>{lang === "en" ? CODE_FILTER_EN : CODE_FILTER}</code></pre>
+      <ul class="guide-intro code-preconditions">
+        <li>{_("前提：订阅中存在名字含「香港」或「JP」的节点，否则过滤后为空。")}</li>
+        <li>{_("示例规则引用的「自动选择」组需真实存在于订阅；若组名不同，请同步改写规则或删除该引用——保存时的试运行会当场暴露悬空引用。")}</li>
+      </ul>
+      <div class="code-wrap">
+        <pre class="code-block"><code>{lang === "en" ? CODE_FILTER_EN : CODE_FILTER}</code></pre>
+        <button class="code-copy" data-copy-code title={_("复制代码")} aria-label={_("复制代码")}>{_("复制")}</button>
+      </div>
       <div class="guide-step"><span>01</span><div><h3>{_("编写并绑定")}</h3><div>{_("新建脚本 → 粘贴代码 → 保存（自动校验，语法/运行时错误当场报）→ 勾选「绑定到当前订阅」并启用。")}</div></div></div>
       <div class="guide-step"><span>02</span><div><h3>{_("多条覆写按序执行")}</h3><div>{_("可同时启用多条覆写与 Merge 补丁，按列表顺序依次应用到订阅上。")}</div></div></div>
       <div class="guide-step"><span>03</span><div><h3>{_("出错兜底")}</h3><div>{_("覆写导致内核启动失败时会自动进入「安全模式」：全部覆写临时禁用并重启内核。修复脚本后保存即恢复正常。")}</div></div></div>
