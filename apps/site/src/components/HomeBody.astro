@@ -56,6 +56,32 @@ const FAQS = [
     ],
   },
   {
+    q: _("显示「运行中」，但浏览器打不开网站？"),
+    a: [
+      { text: _("内核运行 ≠ 浏览器可用。先打开") },
+      { href: route("/features#diagnostics"), label: _("网络诊断向导") },
+      { text: _("，按第一个阻塞项逐层排查（系统代理指向、TUN、DNS）；更多证据化排查步骤见") },
+      { href: route("/guide#troubleshooting"), label: _("连接不通时按证据排查") },
+      { text: _("。") },
+    ],
+  },
+  {
+    q: _("订阅更新失败了？"),
+    a: [
+      { text: _("更新失败不会清空节点，旧配置继续可用；在「配置 → 配置来源」查看最近失败原因与下次重试时间，也可手动更新。详见") },
+      { href: route("/guide#subscriptions"), label: _("订阅更新：知道更新了什么") },
+      { text: _("。") },
+    ],
+  },
+  {
+    q: _("Windows 提示服务缺失，TUN 无法开启？"),
+    a: [
+      { text: _("TUN 依赖随安装包附带的 CrossbowService。用完整安装包重新安装或修复即可；详细步骤见") },
+      { href: route("/guide#windows"), label: _("Windows 安装与 TUN 服务") },
+      { text: _("。") },
+    ],
+  },
+    {
     q: _("如何参与或反馈？"),
     a: [
       { text: _("项目开源于 GitHub，欢迎提交 Issue 与 PR。感谢") },

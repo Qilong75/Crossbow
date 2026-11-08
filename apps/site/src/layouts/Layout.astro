@@ -58,7 +58,7 @@ const nav = [
     <header class="site-header">
       <div class="shell nav-shell">
         <a href={withBase(pathFor(lang, "/"))} class="brand" aria-label={t(lang, "Crossbow 首页")}><Logo size={32} /><span>Crossbow</span></a>
-        <nav id="site-nav" aria-label={t(lang, "主导航")} class="nav-open">
+        <nav id="site-nav" aria-label={t(lang, "主导航")}>
           {nav.map((n) => (
             <a
               href={withBase(pathFor(lang, n.to))}
@@ -150,6 +150,17 @@ const nav = [
         button.addEventListener("click", () => {
           const share = new URL(button.dataset.copy ?? "", location.origin).href;
           navigator.clipboard?.writeText(share).then(() => {
+            const previous = button.textContent;
+            button.textContent = "✓";
+            window.setTimeout(() => { button.textContent = previous; }, 1500);
+          }, () => {});
+        });
+      });
+      document.querySelectorAll<HTMLButtonElement>("[data-copy-code]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const pre = button.closest(".code-wrap")?.querySelector("pre");
+          if (!pre) return;
+          navigator.clipboard?.writeText(pre.textContent ?? "").then(() => {
             const previous = button.textContent;
             button.textContent = "✓";
             window.setTimeout(() => { button.textContent = previous; }, 1500);

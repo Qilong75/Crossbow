@@ -1,5 +1,6 @@
-@font-face { font-family: Manrope; src: url('./assets/fonts/manrope-regular.ttf'); font-weight: 400; font-display: swap; }
-@font-face { font-family: Manrope; src: url('./assets/fonts/manrope-semibold.ttf'); font-weight: 500 700; font-display: swap; }
+/* P3（#365）：TTF 193KB → WOFF2 58KB */
+@font-face { font-family: Manrope; src: url('./assets/fonts/manrope-regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: Manrope; src: url('./assets/fonts/manrope-semibold.woff2') format('woff2'); font-weight: 500 700; font-display: swap; }
 :root {
   color-scheme: light;
   --bg: #fff;
@@ -341,3 +342,14 @@ h2:hover .anchor-button, .anchor-button:focus-visible { opacity: 1; }
 /* Astro 迁移（#363）：双 Logo 主题切换 */
 [data-theme="dark"] .logo-light { display: none; }
 [data-theme="light"] .logo-dark { display: none; }
+
+/* P2（#365）：功能页分组 */
+.detail-group { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); font-size: 13px; font-weight: 600; color: var(--dim); letter-spacing: .06em; }
+.section-nav .nav-group { display: inline-flex; align-items: center; gap: 4px; }
+.section-nav .nav-group-label { font-size: 12px; color: var(--dim); opacity: .75; padding: 0 2px; }
+
+/* P2（#365）：代码示例复制与前提 */
+.code-wrap { position: relative; }
+.code-wrap .code-copy { position: absolute; top: 8px; right: 8px; min-height: 30px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); color: var(--dim); font-size: 12px; cursor: pointer; }
+.code-wrap .code-copy:hover { color: var(--accent); border-color: var(--accent); }
+.code-preconditions { font-size: 13px; color: var(--dim); }
