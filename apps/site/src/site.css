@@ -75,6 +75,7 @@ main:focus { outline: none; }
 .menu-button { display: none; }
 .preference-anchor { position: relative; }
 .preference-popover { position: absolute; right: 0; top: calc(100% + 10px); min-width: 184px; margin: 0; padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--floating); box-shadow: var(--shadow); z-index: 50; transform-origin: top right; animation: preference-in 160ms var(--ease); } /* taste-skill-ignore: a real anchored preferences overlay, with a subtle elevation shadow. */
+.preference-popover fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .preference-popover legend { float: left; width: 100%; padding: 5px 8px 8px; font-size: 11px; color: var(--faint); font-weight: 500; }
 .preference-option { clear: both; position: relative; display: flex; align-items: center; gap: 10px; padding: 9px 10px; min-height: 40px; border-radius: 6px; color: var(--dim); cursor: pointer; font-size: 13px; white-space: nowrap; transition: color 150ms ease, background 150ms ease; }
 .preference-option input { position: absolute; opacity: 0; width: 1px; height: 1px; }
