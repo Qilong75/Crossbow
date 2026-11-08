@@ -546,7 +546,7 @@ const dict: Record<Lang, Record<string, string>> = {
     "home.statePendingHint": "Checking core, configuration and takeover status",
     "home.retryState": "Retry status",
     "home.healthCore": "Core process",
-    "home.healthTakeover": "Takeover setup",
+    "home.healthTakeover": "Configure network takeover",
     "home.healthNetwork": "Connectivity",
     "home.healthSummary": "Connection status",
     "home.networkDiagnosis": "Check in Diagnostics",
