@@ -1,4 +1,5 @@
 """Fetch a pinned sidecar; mirrors must supply exactly the same verified bytes."""
+import json
 import gzip
 import hashlib
 import io
@@ -37,19 +38,38 @@ def main():
     target = sys.argv[1]
     asset, digest = ASSETS[target]
     url = f'https://github.com/MetaCubeX/mihomo/releases/download/{VERSION}/{asset}'
-    # GitHub release CDN 偶发 504（含 gh-proxy 镜像同步链路）：两轮重试，
-    # 轮间隔 30s。仍失败才放弃（真实多源故障）。
+    # GitHub release CDN 偶发持续 504（2026-11-08 连续多小时，gh-proxy 同源
+    # 继承故障）：候选 = 直连、gh-proxy、api.github.com 资产下载（不同基础
+    # 设施域），各两轮重试，轮间隔 30s。仍失败才放弃。
+    data = None
+    api_candidates = []
+    try:
+        release = json.load(urllib.request.urlopen(
+            f'https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/{VERSION}', timeout=30))
+        asset_id = next((a['id'] for a in release.get('assets', []) if a['name'] == asset), None)
+        if asset_id:
+            api_candidates = [
+                f'https://api.github.com/repos/MetaCubeX/mihomo/releases/assets/{asset_id}'
+            ]
+    except Exception as error:
+        print(f'asset id lookup failed: {error}', file=sys.stderr)
+    candidates = [url, 'https://gh-proxy.com/' + url] + api_candidates
     data = None
     for attempt in range(2):
-        for candidate in [url, 'https://gh-proxy.com/' + url]:
+        for idx, candidate in enumerate(candidates):
+            label = f'candidate {idx + 1}/{len(candidates)}'
             try:
-                with urllib.request.urlopen(candidate, timeout=60) as response:
+                req = urllib.request.Request(candidate)
+                token = os.environ.get('GITHUB_TOKEN')
+                if token and 'api.github.com' in candidate:
+                    req.add_header('Authorization', f'Bearer {token}')
+                with urllib.request.urlopen(req, timeout=120) as response:
                     candidate_data = response.read()
                 verify(candidate_data, digest)
                 data = candidate_data
                 break
             except Exception as error:
-                print(f'Sidecar download/verification failed (attempt {attempt + 1}): {error}', file=sys.stderr)
+                print(f'Sidecar download/verification failed ({label}, attempt {attempt + 1}): {error}', file=sys.stderr)
         if data is not None:
             break
         if attempt == 0:
