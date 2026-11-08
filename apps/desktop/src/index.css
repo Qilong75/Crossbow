@@ -3,54 +3,54 @@
 /* Frame Studio: approved B palette; color roles shared by every page and overlay. */
 :root {
   color-scheme: light;
-  --cb-chrome: #f0eeea;
-  --cb-bg: #fdfcfa;
-  --cb-surface: #f8f6f2;
-  --cb-surface-2: #f1eee8;
-  --cb-line: #e6e2da;
-  --cb-line-strong: #d1cbc0;
-  --cb-text: #2b2722;
-  --cb-text-dim: #645c50;
-  --cb-faint: #6f675c;
+  --cb-chrome: #eef0f5;
+  --cb-bg: #ffffff;
+  --cb-surface: #f7f8fb;
+  --cb-surface-2: #f0f2f7;
+  --cb-line: #e4e7ee;
+  --cb-line-strong: #cdd2df;
+  --cb-text: #242b37;
+  --cb-text-dim: #596777;
+  --cb-faint: #626e7d;
   --cb-accent: #455ab5;
-  --cb-brand: #2e2a24;
+  --cb-brand: #293345;
   --cb-accent-soft: #eff2fc;
   --cb-accent-line: #8592c9;
   --cb-ok: #267659;
   --cb-warn: #93651a;
   --cb-bad: #a94850;
-  --cb-up: #8f887d;
+  --cb-up: #8a939f;
   --cb-down: #546abf;
-  --cb-primary: #2e2a24;
+  --cb-primary: #293345;
   --cb-on-primary: #fff;
   --cb-floating: #fff;
-  --cb-overlay: rgba(43, 39, 34, 0.2);
+  --cb-overlay: rgba(30, 36, 48, 0.2);
   --cb-mono: "SF Mono", ui-monospace, Menlo, monospace;
 }
 :root.dark {
   color-scheme: dark;
-  --cb-chrome: #161511;
-  --cb-bg: #1d1c18;
-  --cb-surface: #262420;
-  --cb-surface-2: #34312b;
-  --cb-line: #38352e;
-  --cb-line-strong: #4e4a40;
-  --cb-text: #ece9e3;
-  --cb-text-dim: #b0aa9e;
-  --cb-faint: #9a948a;
+  --cb-chrome: #121317;
+  --cb-bg: #1a1c21;
+  --cb-surface: #23262d;
+  --cb-surface-2: #30343d;
+  --cb-line: #343840;
+  --cb-line-strong: #4b5260;
+  --cb-text: #e9ebf1;
+  --cb-text-dim: #adb2be;
+  --cb-faint: #989fac;
   --cb-accent: #b7b4ed;
-  --cb-brand: #eae7e0;
+  --cb-brand: #e7eaf2;
   --cb-accent-soft: #2d2d40;
   --cb-accent-line: #8e88bb;
   --cb-ok: #8acdaf;
   --cb-warn: #dfbe83;
   --cb-bad: #f4a5ad;
-  --cb-up: #b0aa9e;
+  --cb-up: #adb2be;
   --cb-down: #b7b4ed;
-  --cb-primary: #eae7e0;
+  --cb-primary: #e7eaf2;
   --cb-on-primary: #20232b;
-  --cb-floating: #2d2b25;
-  --cb-overlay: rgba(15, 14, 10, 0.5);
+  --cb-floating: #2a2e36;
+  --cb-overlay: rgba(8, 10, 15, 0.5);
 }
 
 html,
