@@ -37,16 +37,24 @@ def main():
     target = sys.argv[1]
     asset, digest = ASSETS[target]
     url = f'https://github.com/MetaCubeX/mihomo/releases/download/{VERSION}/{asset}'
+    # GitHub release CDN 偶发 504（含 gh-proxy 镜像同步链路）：两轮重试，
+    # 轮间隔 30s。仍失败才放弃（真实多源故障）。
     data = None
-    for candidate in [url, 'https://gh-proxy.com/' + url]:
-        try:
-            with urllib.request.urlopen(candidate, timeout=60) as response:
-                candidate_data = response.read()
-            verify(candidate_data, digest)
-            data = candidate_data
+    for attempt in range(2):
+        for candidate in [url, 'https://gh-proxy.com/' + url]:
+            try:
+                with urllib.request.urlopen(candidate, timeout=60) as response:
+                    candidate_data = response.read()
+                verify(candidate_data, digest)
+                data = candidate_data
+                break
+            except Exception as error:
+                print(f'Sidecar download/verification failed (attempt {attempt + 1}): {error}', file=sys.stderr)
+        if data is not None:
             break
-        except Exception as error:
-            print(f'Sidecar download/verification failed: {error}', file=sys.stderr)
+        if attempt == 0:
+            import time
+            time.sleep(30)
     if data is None:
         raise RuntimeError('No mirror returned the expected sidecar')
     if asset.endswith('.gz'):
