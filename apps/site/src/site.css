@@ -337,3 +337,7 @@ h2:hover .anchor-button, .anchor-button:focus-visible { opacity: 1; }
 .platform-badge { align-self: flex-start; margin-top: 8px; padding: 3px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 600; }
 .download-platform.recommended { border-color: var(--accent); }
 @media (max-width: 900px) { .guide-toc { grid-template-columns: 1fr; } }
+
+/* Astro 迁移（#363）：双 Logo 主题切换 */
+[data-theme="dark"] .logo-light { display: none; }
+[data-theme="light"] .logo-dark { display: none; }
