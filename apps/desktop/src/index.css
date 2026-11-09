@@ -114,30 +114,11 @@ button:not(:disabled):hover {
   box-shadow: none;
 }
 
-/* A quiet update strip: one 32px row, without a nested icon tile or badge. */
-.cb-update-banner {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 32px;
-  padding: 6px 10px;
-  border: 1px solid var(--cb-line);
-  border-radius: 7px;
-  background: var(--cb-surface);
-  color: var(--cb-text);
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 120ms, background-color 120ms;
-}
-.cb-update-banner:hover {
-  border-color: var(--cb-accent-line);
-  background: var(--cb-surface-2);
-}
-.cb-update-banner:focus-visible {
-  outline: 2px solid var(--cb-accent);
-  outline-offset: 2px;
+/* Keep update feedback in the toolbar, at the same height as its neighbours. */
+.cb-global-tools .cb-update-entry {
+  --button-line: var(--cb-accent-line);
+  --button-ink: var(--cb-text);
+  --button-hover: var(--cb-accent-soft);
 }
 .cb-update-icon {
   display: grid;
@@ -147,48 +128,30 @@ button:not(:disabled):hover {
   height: 16px;
   color: var(--cb-accent);
 }
-.cb-update-content {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  overflow: hidden;
-}
-.cb-update-title {
-  flex: none;
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 18px;
-  white-space: nowrap;
-}
-.cb-update-version {
-  min-width: 0;
-  color: var(--cb-text-dim);
-  font-size: 11px;
-  line-height: 16px;
-  white-space: nowrap;
+.cb-update-meta {
+  max-width: 76px;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.cb-update-percent {
-  flex: none;
   color: var(--cb-text-dim);
   font-size: 11px;
-  line-height: 16px;
   font-variant-numeric: tabular-nums;
 }
-.cb-update-action {
-  display: flex;
-  align-items: center;
-  flex: none;
-  gap: 5px;
-  color: var(--cb-accent);
-  font-size: 11px;
-  line-height: 16px;
-  font-weight: 500;
+@media (max-width: 1260px) {
+  .cb-update-entry .cb-update-title { display: none; }
+  .cb-global-tools:has(> .cb-update-entry) .cb-source-pick { max-width: 108px; }
+  .cb-global-nav:has(.cb-update-entry) { gap: 20px; }
+  .cb-global-nav:has(.cb-update-entry) .cb-primary-nav { gap: 18px; }
 }
-.cb-update-action > span { display: flex; }
+@media (max-width: 1000px) {
+  .cb-global-tools .cb-update-entry {
+    width: var(--button-height);
+    padding-inline: 0;
+  }
+  .cb-update-entry .cb-update-meta { display: none; }
+  .cb-global-nav:has(.cb-update-entry) { gap: 14px; }
+  .cb-global-nav:has(.cb-update-entry) .cb-primary-nav { gap: 12px; }
+  .cb-global-tools:has(> .cb-update-entry) { gap: 10px; }
+}
 .cb-progress-ring {
   display: inline-flex;
   flex: none;
@@ -227,7 +190,7 @@ button:not(:disabled):hover {
 
 /* 大写微标签（区块标题） */
 .cb-micro {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--cb-faint);
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -236,7 +199,7 @@ button:not(:disabled):hover {
 
 /* 表格列头（连接页列表/聚合双视图共用） */
 .cb-th {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--cb-faint);
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -275,7 +238,7 @@ button:not(:disabled):hover {
 
 /* 徽标 */
 .cb-badge {
-  font-size: 10px;
+  font-size: 11px;
   border-radius: 5px;
   padding: 2px 7px;
   color: var(--cb-accent);
@@ -440,7 +403,7 @@ input[type="checkbox"] {
   background: var(--cb-surface);
   border-bottom: 1px solid var(--cb-line-strong);
   font-family: var(--cb-sans, -apple-system, sans-serif);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -468,7 +431,7 @@ input[type="checkbox"] {
   display: inline-block;
   padding: 1px 6px;
   border-radius: 4px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 16px;
 }
@@ -481,7 +444,7 @@ input[type="checkbox"] {
 }
 
 .cb-log-source {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--cb-faint);
 }
 
@@ -533,7 +496,7 @@ body,
   background: var(--cb-chrome);
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
-  font-size: 14px;
+  font-size: 13px;
 }
 button,
 a,
@@ -586,7 +549,7 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 650;
   letter-spacing: -0.5px;
   flex: none;
@@ -604,7 +567,7 @@ summary:focus-visible {
 .cb-primary-nav button {
   position: relative;
   padding: 0 2px;
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
   color: var(--cb-text-dim);
 }
@@ -929,7 +892,7 @@ summary:focus-visible {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 20px;
   font-weight: 550;
 }
@@ -1029,7 +992,7 @@ summary:focus-visible {
   justify-content: space-between;
   flex: none;
   width: 24px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 10px;
   color: var(--cb-faint);
   font-variant-numeric: tabular-nums;
@@ -1097,7 +1060,7 @@ summary:focus-visible {
 }
 .cb-home-card-title h3 {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 20px;
 }
@@ -1155,7 +1118,7 @@ summary:focus-visible {
   min-width: 0;
 }
 .cb-takeover-row b {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
 }
 .cb-takeover-row p {
@@ -1303,7 +1266,7 @@ summary:focus-visible {
     margin-top: 10px;
   }
   .cb-rate-pair b {
-    font-size: 22px;
+    font-size: 20px;
     line-height: 27px;
   }
   .cb-session-strip {
@@ -1394,7 +1357,7 @@ summary:focus-visible {
     gap: 20px;
   }
   .cb-home-lead h2 {
-    font-size: 22px;
+    font-size: 20px;
     margin: 6px 0 4px;
   }
   .cb-home-lead p {
@@ -1439,7 +1402,7 @@ summary:focus-visible {
     display: none;
   }
   .cb-chart-foot {
-    font-size: 10px;
+    font-size: 11px;
   }
 }
 
@@ -1603,7 +1566,7 @@ summary:focus-visible {
 }
 .cb-settings-group > div:first-child {
   padding: 0 0 16px;
-  font-size: 14px;
+  font-size: 13px;
   color: var(--cb-text);
   font-weight: 550;
 }
@@ -1618,14 +1581,14 @@ summary:focus-visible {
   padding: 64px 24px;
   text-align: center;
   color: var(--cb-text-dim);
-  font-size: 14px;
+  font-size: 13px;
 }
 .cb-empty svg {
   /* flex 列里 auto margin 会吞掉全部剩余空间、把内容推到底部（#232），水平居中交给 align-items */
   margin: 0 auto 16px;
 }
 .cb-empty h2 {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 500;
   color: var(--cb-text);
   margin-bottom: 8px;
@@ -1664,7 +1627,7 @@ summary:focus-visible {
   margin-bottom: 9px;
 }
 .cb-profile-facts dd {
-  font-size: 14px;
+  font-size: 13px;
   line-height: 22px;
   overflow-wrap: anywhere;
 }
@@ -1709,7 +1672,7 @@ summary:focus-visible {
   font-weight: 550;
 }
 .cb-dialog header button {
-  font-size: 22px;
+  font-size: 20px;
   color: var(--cb-text-dim);
   width: 32px;
   height: 32px;
@@ -1800,7 +1763,7 @@ summary:focus-visible {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  font-size: 15px;
+  font-size: 16px;
   flex: none;
 }
 .cb-diag-summary h2 {
@@ -2045,7 +2008,7 @@ summary:focus-visible {
   text-overflow: ellipsis;
 }
 .cb-source-pick .cb-button-label > span:last-child {
-  font-size: 18px;
+  font-size: 16px;
 }
 @media (max-width: 950px) {
   .cb-source-pick {
@@ -2096,7 +2059,7 @@ body,
   gap: 12px 20px;
 }
 .cb-page-head h1 {
-  font-size: 22px;
+  font-size: 20px;
   line-height: 28px;
 }
 .cb-page-head p {
@@ -2237,7 +2200,7 @@ body,
   width: 26px;
   height: 24px;
   border-radius: 5px;
-  font-size: 17px;
+  font-size: 16px;
   border: 1px solid var(--cb-line);
 }
 .cb-fit-pager button:not(:disabled):hover {
@@ -2511,7 +2474,7 @@ body,
   font-size: 13px;
 }
 .cb-diag-summary h2 {
-  font-size: 17px;
+  font-size: 16px;
 }
 .cb-diag-summary p {
   font-size: 12px;

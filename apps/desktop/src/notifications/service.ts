@@ -13,6 +13,7 @@ export type NotificationAction =
   | "diagnostics"
   | "logs"
   | "profiles"
+  | "nodes"
   | "retryDownload";
 export interface Notification {
   id: string;
@@ -78,6 +79,7 @@ const copy = {
   close: ["关闭通知", "Dismiss notification"],
   history: ["最近通知", "Recent notifications"],
   profiles: ["打开配置", "Open profiles"],
+  nodes: ["选择节点", "Pick a node"],
   retryDownload: ["重新下载", "Retry download"],
   empty: ["本次会话暂无通知", "No notifications in this session"],
   settings: ["前往设置", "Open settings"],
@@ -125,6 +127,14 @@ const copy = {
   "tun.externalProxy.hint": [
     "请在其他代理客户端或系统网络设置中关闭系统代理。处理后提示会自动解除。",
     "Turn off the system proxy in the other proxy app or system network settings. This notice clears when the conflict is resolved.",
+  ],
+  "tun.wedgeRestart": [
+    "TUN 通道无响应，正在重启内核恢复",
+    "TUN unresponsive; restarting core to recover",
+  ],
+  "sysproxy.coreDead": [
+    "内核未运行，已关闭系统代理",
+    "Core is down; system proxy turned off",
   ],
   "tun.takeoverGiveUp": [
     "TUN 接管异常，已停止自动恢复",
@@ -209,6 +219,8 @@ function publish(input: NotificationInput): Promise<unknown> {
 export interface TaskFeedback {
   feedback?: "task" | "error-only";
   titleKey?: string;
+  /** 成功通知附带的跳转动作（条 7：导入成功 → 选节点） */
+  nextActions?: NotificationAction[];
 }
 let attempt = 0;
 export const notify = {
@@ -288,6 +300,7 @@ export const notify = {
           kind: "success",
           title: "",
           description: success ?? title,
+          actions: options.nextActions ?? [],
         });
       return { ok: true, value };
     } catch (error) {

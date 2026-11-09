@@ -235,7 +235,8 @@ fn default_theme() -> String {
 }
 
 fn default_lang() -> String {
-    "zh".into()
+    // 英文优先（#353/#355）：新安装默认英文；已持久化过语言设置的旧用户保持原值
+    "en".into()
 }
 
 impl Default for UiSettings {

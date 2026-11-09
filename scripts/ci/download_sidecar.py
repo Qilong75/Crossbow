@@ -1,4 +1,6 @@
 """Fetch a pinned sidecar; mirrors must supply exactly the same verified bytes."""
+import json
+import os
 import gzip
 import hashlib
 import io
@@ -37,16 +39,49 @@ def main():
     target = sys.argv[1]
     asset, digest = ASSETS[target]
     url = f'https://github.com/MetaCubeX/mihomo/releases/download/{VERSION}/{asset}'
+    # GitHub release CDN 偶发持续 504（2026-11-08 连续多小时，gh-proxy 同源
+    # 继承故障）：两轮重试（直连 + gh-proxy）。仍失败才走末路镜像
+    # api.github.com 资产下载（不同基础设施域，CDN 故障时仍可用）。
     data = None
-    for candidate in [url, 'https://gh-proxy.com/' + url]:
+    for attempt in range(2):
+        for candidate in [url, 'https://gh-proxy.com/' + url]:
+            try:
+                with urllib.request.urlopen(candidate, timeout=60) as response:
+                    candidate_data = response.read()
+                verify(candidate_data, digest)
+                data = candidate_data
+                break
+            except Exception as error:
+                print(f'Sidecar download/verification failed (attempt {attempt + 1}): {error}', file=sys.stderr)
+        if data is not None:
+            break
+        if attempt == 0:
+            import time
+            time.sleep(30)
+    if data is None:
+        # 末路镜像：api.github.com 资产下载。查询与下载分两步且都在
+        # try 内——任一失败仅打印，绝不影响前面的候选结果。
         try:
-            with urllib.request.urlopen(candidate, timeout=60) as response:
+            release = json.load(urllib.request.urlopen(
+                f'https://api.github.com/repos/MetaCubeX/mihomo/releases/tags/{VERSION}',
+                timeout=30))
+            asset_id = next((a['id'] for a in release.get('assets', [])
+                             if a['name'] == asset), None)
+            if not asset_id:
+                raise ValueError(f'asset {asset} not found in release {VERSION}')
+            req = urllib.request.Request(
+                f'https://api.github.com/repos/MetaCubeX/mihomo/releases/assets/{asset_id}',
+                headers={'Accept': 'application/octet-stream'})
+            token = os.environ.get('GITHUB_TOKEN')
+            if token:
+                req.add_header('Authorization', f'Bearer {token}')
+            with urllib.request.urlopen(req, timeout=180) as response:
                 candidate_data = response.read()
             verify(candidate_data, digest)
             data = candidate_data
-            break
+            print('Sidecar downloaded via api.github.com mirror.')
         except Exception as error:
-            print(f'Sidecar download/verification failed: {error}', file=sys.stderr)
+            print(f'api.github.com mirror failed: {error}', file=sys.stderr)
     if data is None:
         raise RuntimeError('No mirror returned the expected sidecar')
     if asset.endswith('.gz'):

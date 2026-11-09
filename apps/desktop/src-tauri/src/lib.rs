@@ -10,9 +10,9 @@ use std::sync::Mutex;
 
 use crossbow_core::subscription::{fetch_subscription, now_secs, validate_profile_content};
 use crossbow_core::{Profile, ProfileKind, RuntimeConfig, Store, UiSettings};
-use tauri::menu::{CheckMenuItem, Menu, MenuBuilder, MenuItem, SubmenuBuilder};
+#[cfg(not(target_os = "macos"))]
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, State, Wry};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as _};
 use tauri_plugin_deep_link::DeepLinkExt as _;
 
@@ -24,6 +24,7 @@ mod authorization;
 mod coexist;
 mod config_transition;
 mod core_manager;
+mod core_restart;
 mod diagnose;
 mod site_tests;
 #[cfg(windows)]
@@ -42,6 +43,9 @@ mod sysproxy;
 #[cfg(target_os = "macos")]
 mod tray_speed;
 mod tray_state;
+mod tray_menu;
+#[cfg(target_os = "macos")]
+mod tray_helper;
 #[cfg(target_os = "macos")]
 mod tun;
 #[cfg(windows)]
@@ -83,7 +87,8 @@ pub struct AppState {
     sysproxy: SysProxyManager,
     /// 内核运行模式：direct / rule / global。
     mode: Mutex<String>,
-    tray: Mutex<Option<tauri::tray::TrayIcon<Wry>>>,
+    #[cfg(not(target_os = "macos"))]
+    tray: Mutex<Option<tauri::tray::TrayIcon<tauri::Wry>>>,
     ws: WsHub,
     data_dir: PathBuf,
     /// 托盘节点子菜单统一状态（此前 9 个分散锁的字段全部收拢于此）
@@ -767,6 +772,14 @@ fn recover_config_network(state: &AppState) -> Result<(), String> {
     } else {
         Ok(())
     };
+    #[cfg(target_os = "macos")]
+    if tun {
+        state.core().log_decision(&format!(
+            "tun cleanup: system_proxy_restored={} {}",
+            proxy.is_ok() && tun_proxy.is_ok(),
+            core_manager::tun_route_diagnostics(),
+        ));
+    }
     match (proxy, tun_proxy) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(a), Err(b)) => Err(format!("系统代理恢复失败：{a}；TUN 代理恢复失败：{b}")),
@@ -1413,6 +1426,9 @@ fn set_profile_interval(
 async fn set_active_profile(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     commit_config_change(&state, |data| data.set_active_profile(&id))?;
     refresh_tray(&app);
+    // 托盘/前端切换共用此命令：发事件让前端各处（页头配置名、概览卡片等）
+    // 同步刷新——切换器自己的 DOM 事件只有页面内组件收得到（#357）。
+    let _ = app.emit("profile://switched", id.as_str());
     Ok(())
 }
 
@@ -2577,6 +2593,8 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
 
     const INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
     const MAX_CONSECUTIVE_FAILURES: u8 = 3;
+    const MAX_WEDGE_RESTARTS: u8 = 2;
+    const WEDGE_COOLDOWN_SECS: u64 = 90;
     let handle = app.clone();
     std::thread::spawn(move || {
         let _background = authorization::BackgroundGuard::enter();
@@ -2587,14 +2605,59 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
         let mut reported_giveup = false;
         let mut reported_recovery_failure = false;
         let mut external_proxy_notice = sysproxy::ExternalProxyNotice::default();
+        // TUN 栈楔死（#350）：保留重启预算与冷却，以及系统代理死亡看门狗。
+        let mut wedge_restarts = 0u8;
+        let mut wedge_cooldown_until = std::time::Instant::now();
+        let mut sysproxy_dead_ticks = 0u8;
         loop {
             let cycle_started = std::time::Instant::now();
             if let Some(state) = handle.try_state::<AppState>() {
                 let tun_enabled = state.store.lock().unwrap().data().engine.tun_enable;
                 let core_status = state.core().status();
+                #[cfg(unix)]
+                let core_pid = state.core().pid();
                 if !tun_enabled || core_status == CoreStatus::Starting || state.exit.ensure_open().is_err() {
                     if !tun_enabled && external_proxy_notice.update(false) == Some(false) {
                         notifications::resolve(&handle, "tun-external-proxy");
+                    }
+                    // 系统代理模式（无 TUN）的兜底：Crossbow 开着系统代理而内核
+                    // 死亡 → 代理指向死端口，走代理的应用整机断网。连续 3 个周期
+                    // （15s）核心未恢复 → 关闭系统代理（还原快照），直连流量立即
+                    // 恢复，避免黑洞。仅清 Crossbow 自己开的代理（status() 读
+                    // 内存状态，不碰其他客户端设置的代理）。
+                    let sysproxy_mode = state.exit.ensure_open().is_ok()
+                        && !tun_enabled
+                        && state.sysproxy.status().enabled
+                        && matches!(core_status, CoreStatus::Crashed(_) | CoreStatus::Stopped);
+                    if sysproxy_mode {
+                        sysproxy_dead_ticks = sysproxy_dead_ticks.saturating_add(1);
+                        if sysproxy_dead_ticks >= MAX_CONSECUTIVE_FAILURES {
+                            sysproxy_dead_ticks = 0;
+                            let _operation = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
+                            if state.exit.ensure_open().is_ok()
+                                && !state.store.lock().unwrap().data().engine.tun_enable
+                                && matches!(state.core().status(), CoreStatus::Crashed(_) | CoreStatus::Stopped)
+                            {
+                                match state.sysproxy.disable() {
+                                    Ok(()) => {
+                                        let _ = handle.emit("sysproxy://status", state.sysproxy.status());
+                                        refresh_tray(&handle);
+                                        let mut notice = notifications::Notice::new(
+                                            notifications::Kind::Warning,
+                                            "sysproxy.coreDead",
+                                            "tun-health",
+                                        );
+                                        notice.duration = Some(0);
+                                        notifications::publish(&handle, notice);
+                                    }
+                                    Err(error) => {
+                                        eprintln!("sysproxy stale-off failed: {error}");
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        sysproxy_dead_ticks = 0;
                     }
                     failures = 0;
                     drift_strikes = 0;
@@ -2607,6 +2670,13 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                     // 持续即关开重建立（2 分钟冷却、连续 3 次后停止自动恢复
                     // 并一次性通知），重建立周期跳过连通性探测。
                     let mut skip_probe = false;
+                    let wedge_cooling = std::time::Instant::now() < wedge_cooldown_until;
+                    if wedge_cooling {
+                        // 重启内核后的稳定期：跳过探测与漂移检测，失败计数清零
+                        skip_probe = true;
+                        failures = 0;
+                        drift_strikes = 0;
+                    }
                     let cooling = std::time::Instant::now() < reestablish_cooldown_until;
                     #[cfg(target_os = "macos")]
                     let drifted = !cooling && crate::tun::takeover_drift();
@@ -2744,7 +2814,42 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                             if failures >= MAX_CONSECUTIVE_FAILURES {
                                 let still_enabled =
                                     state.store.lock().unwrap().data().engine.tun_enable;
-                                if still_enabled {
+                                if still_enabled && wedge_restarts < MAX_WEDGE_RESTARTS {
+                                    // 重启内核优先（#350）：SIGTERM 让 mihomo 走退出钩子
+                                    // 恢复路由，崩溃自动重启链路拉起新内核重建 TUN——
+                                    // 这才真正修复 gvisor 栈僵死。直接关 TUN 会让国外
+                                    // 流量直连被墙（系统代理未开时表现为整机断网）。
+                                    wedge_restarts = wedge_restarts.saturating_add(1);
+                                    failures = 0;
+                                    reported_recovery_failure = false;
+                                    wedge_cooldown_until =
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_secs(90);
+                                    let mut notice = notifications::Notice::new(
+                                        notifications::Kind::Warning,
+                                        "tun.wedgeRestart",
+                                        "tun-health",
+                                    );
+                                    notice.duration = Some(0);
+                                    notice.actions = vec![notifications::Action::Diagnostics];
+                                    notifications::publish(&handle, notice);
+                                    #[cfg(unix)]
+                                    let restarted = {
+                                        let _operation = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
+                                        state.exit.ensure_open().is_ok()
+                                            && state.store.lock().unwrap().data().engine.tun_enable
+                                            && state.core().status() == CoreStatus::Running
+                                            && core_pid.is_some()
+                                            && state.core().pid() == core_pid
+                                            && state.core().signal_graceful_restart()
+                                    };
+                                    #[cfg(not(unix))]
+                                    let restarted = false;
+                                    eprintln!(
+                                        "tun health: restarting core to recover wedged TUN (attempt {wedge_restarts}/{MAX_WEDGE_RESTARTS}, signaled={restarted})"
+                                    );
+                                    skip_probe = true;
+                                } else if still_enabled {
                                     match disable_tun_if_enabled(&state) {
                                         Ok(()) => {
                                             failures = 0;
@@ -3119,11 +3224,16 @@ fn tray_menu_data(state: &AppState) -> tray_state::TrayMenuData {
     tray.snapshot(&node_label, &current_label)
 }
 
-fn build_tray_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
+fn tray_menu_entries(
+    app: &AppHandle,
+    #[cfg(target_os = "macos")] data: &tray_state::TrayMenuData,
+) -> Vec<tray_menu::Entry> {
+    use tray_menu::Entry;
     let state = app.state::<AppState>();
     let lang = state.store.lock().unwrap().data().ui.lang.clone();
 
     let sp = state.sysproxy.status();
+    #[cfg(target_os = "macos")]
     let tun_enabled = state.store.lock().unwrap().data().engine.tun_enable;
     let proxy_label = if !platform::capabilities().system_proxy {
         tr(&lang, "系统代理：当前平台暂不支持", "System proxy: unavailable on this platform")
@@ -3136,7 +3246,7 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
     } else {
         tr(&lang, "系统代理：已关闭", "System Proxy: Off")
     };
-    let proxy = MenuItem::with_id(app, "toggle-proxy", &proxy_label, platform::capabilities().system_proxy, None::<&str>)?;
+    let proxy = Entry::action("toggle-proxy", proxy_label, platform::capabilities().system_proxy);
     #[cfg(target_os = "macos")]
     let tun_label = if tun_enabled {
         if state.core().status() == CoreStatus::Running {
@@ -3148,12 +3258,10 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
         tr(&lang, "TUN 模式：已关闭", "TUN mode: Off")
     };
     #[cfg(target_os = "macos")]
-    let tun_item = MenuItem::with_id(app, "toggle-tun", &tun_label, true, None::<&str>)?;
+    let tun_item = Entry::action("toggle-tun", tun_label, true);
+
 
     let mode = state.mode.lock().unwrap().clone();
-    let mk_check = |id: &str, label: &str, checked: bool| {
-        CheckMenuItem::with_id(app, id, label, true, checked, None::<&str>)
-    };
     let mode_label = format!(
         "{}：{}",
         tr(&lang, "模式", "Mode"),
@@ -3171,23 +3279,14 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
             }
         )
     );
-    let mode_menu = SubmenuBuilder::new(app, &mode_label)
-        .item(&mk_check(
-            "mode-direct",
-            &tr(&lang, "直连", "Direct"),
-            mode == "direct",
-        )?)
-        .item(&mk_check(
-            "mode-rule",
-            &tr(&lang, "规则", "Rule"),
-            mode == "rule",
-        )?)
-        .item(&mk_check(
-            "mode-global",
-            &tr(&lang, "全局", "Global"),
-            mode == "global",
-        )?)
-        .build()?;
+    let mode_menu = Entry::Submenu(
+        mode_label,
+        vec![
+            Entry::check("mode-direct", tr(&lang, "直连", "Direct"), mode == "direct"),
+            Entry::check("mode-rule", tr(&lang, "规则", "Rule"), mode == "rule"),
+            Entry::check("mode-global", tr(&lang, "全局", "Global"), mode == "global"),
+        ],
+    );
 
     let (profiles, active) = {
         let store = state.store.lock().unwrap();
@@ -3196,150 +3295,67 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<Wry>, tauri::Error> {
             store.data().active_profile.clone(),
         )
     };
-    let mut profile_builder = SubmenuBuilder::new(app, tr(&lang, "配置", "Profiles"));
-    for p in &profiles {
-        profile_builder = profile_builder.item(&mk_check(
-            &format!("profile-{}", p.id),
-            &p.name,
-            active.as_deref() == Some(p.id.as_str()),
-        )?);
-    }
-    let profile_menu = profile_builder.build()?;
+    let profile_menu = Entry::Submenu(
+        tr(&lang, "配置", "Profiles"),
+        profiles.iter().map(|profile| {
+            Entry::check(
+                format!("profile-{}", profile.id),
+                profile.name.clone(),
+                active.as_deref() == Some(profile.id.as_str()),
+            )
+        }).collect(),
+    );
 
-    // 节点选择子菜单：标题=「主组：当前选中」，首项=延迟测速，
-    // 其后为展示节点列表（名称+最近延迟），点击节点即切换。
-    // macOS 专属（依赖 NSStatusItem 富文本）；Windows 不展示该子菜单。
+    let mut entries = vec![proxy];
     #[cfg(target_os = "macos")]
-    let node_menu_data = {
-        let data = state.node_menu.lock().unwrap_or_else(|e| e.into_inner()).snapshot(
-            &tr(&lang, "节点选择", "Nodes"),
-            &tr(&lang, "当前", "Current"),
-        );
-        Some((data.title, data.rows, data.testing))
-    };
-
-    let open = MenuItem::with_id(
-        app,
-        "open",
-        tr(&lang, "打开主窗口", "Open Window"),
-        true,
-        None::<&str>,
-    )?;
-    // 无新版本时为 None——菜单里不渲染占位空行
-    #[cfg(target_os = "macos")]
-    let update_item: Option<tauri::menu::MenuItem<Wry>> =
-        update_check::tray_label(app).and_then(|label| {
-            MenuItem::with_id(app, "tray-update", &label, true, None::<&str>).ok()
-        });
-    let quit = MenuItem::with_id(
-        app,
-        "quit",
-        tr(&lang, "退出（还原系统代理）", "Quit (restore proxy)"),
-        true,
-        None::<&str>,
-    )?;
-
-    // 节点子菜单整段 macOS 专属；Windows 直接返回基础菜单
-    #[cfg(not(target_os = "macos"))]
-    {
-        return MenuBuilder::new(app)
-            .item(&proxy)
-            .separator()
-            .item(&mode_menu)
-            .item(&profile_menu)
-            .separator()
-            .item(&open)
-            .separator()
-            .item(&quit)
-            .build();
-    }
-
+    entries.push(tun_item);
+    entries.extend([Entry::Separator, mode_menu]);
     #[cfg(target_os = "macos")]
     {
-        let (group_menu_label, rows, testing) = node_menu_data.unwrap();
-        if rows.is_empty() {
-            let mut b = MenuBuilder::new(app)
-                .item(&proxy)
-                .item(&tun_item)
-                .separator()
-                .item(&mode_menu)
-                .item(&profile_menu)
-                .separator();
-            if let Some(item) = &update_item {
-                b = b.item(item);
-            }
-            return b.item(&open).separator().item(&quit).build();
-        }
-        let group_menu_label = tray_speed::format_flag_spacing(&group_menu_label);
-        let mut node_builder = SubmenuBuilder::new(app, &group_menu_label);
-        let delay_test = MenuItem::with_id(
-            app,
-            "tray-delay-test",
-            &if testing {
+        if !data.rows.is_empty() {
+            let label = if data.testing {
                 tr(&lang, "延迟测速中…", "Testing latency…")
             } else {
                 tr(&lang, "延迟测速", "Test latency")
-            },
-            !testing,
-            None::<&str>,
-        )?;
-        node_builder = node_builder.item(&delay_test).separator();
-        for row in &rows {
-            node_builder = node_builder.item(&mk_check(
-                &format!("node-{}", row.name),
-                &format!("{}\t{}", tray_speed::display_name(&row.label), row.badge),
-                row.selected,
-            )?);
+            };
+            let mut nodes = vec![
+                Entry::action("tray-delay-test", label, !data.testing),
+                Entry::Separator,
+            ];
+            nodes.extend(data.rows.iter().map(|row| {
+                Entry::check(format!("node-{}", row.name), row.label.clone(), row.selected)
+            }));
+            entries.push(Entry::Submenu(tray_speed::format_flag_spacing(&data.title), nodes));
         }
-        let node_menu = node_builder.build()?;
-
-        let mut b = MenuBuilder::new(app)
-            .item(&proxy)
-            .item(&tun_item)
-            .separator()
-            .item(&mode_menu)
-            .item(&node_menu)
-            .item(&profile_menu)
-            .separator();
-        if let Some(item) = &update_item {
-            b = b.item(item);
-        }
-        b.item(&open)
-            .separator()
-            .item(&quit)
-            .build()
     }
+    entries.extend([profile_menu, Entry::Separator]);
+    #[cfg(target_os = "macos")]
+    if let Some(label) = update_check::tray_label(app) {
+        entries.push(Entry::action("tray-update", label, true));
+    }
+    entries.extend([
+        Entry::action("open", tr(&lang, "打开主窗口", "Open Window"), true),
+        Entry::Separator,
+        Entry::action("quit", tr(&lang, "退出（还原系统代理）", "Quit (restore proxy)"), true),
+    ]);
+    entries
 }
 
 fn refresh_tray(app: &AppHandle) {
-    // 关键：不能在持有 tray 锁的状态下构建/设置菜单——两者都会同步派发到
-    // 主线程执行，而主线程上的托盘标题回调（每秒一次）也要拿这把锁，
-    // 持锁派发 = ABBA 死锁（强制退出报告实锤）。先克隆引用再释放锁。
-    let tray = app.state::<AppState>().tray.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let Some(tray) = tray else { return };
-    match build_tray_menu(app) {
-        Ok(menu) => {
-            let _ = tray.set_menu(Some(menu));
-        }
-        Err(e) => eprintln!("rebuild tray menu: {e}"),
-    }
-    // 菜单重建后立即应用等宽列与延迟颜色；测试状态也按当前语言保持一致。
     #[cfg(target_os = "macos")]
+    tray_speed::refresh_menu(app);
+
+    #[cfg(not(target_os = "macos"))]
     {
-        let lang = app
-            .state::<AppState>()
-            .store
-            .lock()
-            .unwrap()
-            .data()
-            .ui
-            .lang
-            .clone();
-        let data = app.state::<AppState>().node_menu.lock().unwrap_or_else(|e| e.into_inner()).snapshot(
-            &crate::tr(&lang, "节点选择", "Nodes"),
-            &crate::tr(&lang, "当前", "Current"),
-        );
-        tray_speed::update_node_menu(app, &data.title, &data.rows, data.testing);
+        // Release the tray lock before menu operations dispatch to the main thread.
+        let tray = app.state::<AppState>().tray.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(tray) = tray else { return };
+        match tray_menu::build(app, &tray_menu_entries(app)) {
+            Ok(menu) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            Err(e) => eprintln!("rebuild tray menu: {e}"),
+        }
     }
 }
 
@@ -3597,8 +3613,7 @@ fn show_tray_toggle_error(app: &AppHandle, source: &str, code: &str, error: Stri
     notifications::result(app, source, code, Err(error));
 }
 
-fn handle_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
-    let id = event.id().as_ref();
+fn handle_menu(app: &AppHandle, id: &str) {
     let result = match id {
         "toggle-proxy" => {
             let handle = app.clone();
@@ -3812,7 +3827,139 @@ fn is_elevated() -> bool {
     unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
 }
 
+/// panic 落盘（#352）：GUI 进程 stderr 不可见，启动路径的 panic（如
+/// 昨日 did_finish_launching SIGABRT ×3）过去完全无消息留痕。在
+/// Builder 之前注册——覆盖 setup 阶段的所有 panic；写数据目录
+/// panic.log（时间 + 线程 + 消息 + 位置），写失败静默放弃（钩子里
+/// 不能再 panic）。
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".into()
+        };
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("<unnamed>").to_string();
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let line = format!(
+            "[{ms}] thread '{thread_name}' panicked at {location}: {payload}\n"
+        );
+        // 与 data_dir 同目标但不依赖 AppState：macOS ~/Library/Application
+        // Support；Windows %APPDATA%。写失败静默放弃（钩子内不能再 panic）。
+        #[cfg(target_os = "macos")]
+        let dir = std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h))
+            .map(|h| h.join("Library/Application Support/com.richard.crossbow"));
+        #[cfg(target_os = "windows")]
+        let dir = std::env::var_os("APPDATA")
+            .map(|h| std::path::PathBuf::from(h))
+            .map(|h| h.join("com.richard.crossbow"));
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let dir: Option<std::path::PathBuf> = None;
+        if let Some(dir) = dir {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("panic.log"))
+                .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        }
+        default_hook(info);
+    }));
+}
+
+/// 启动最前部的残留系统代理自愈：上一实例崩溃（如 did_finish_launching
+/// panic，早于 setup 内的 recover_stale）会把系统代理留在死端口上，走代理
+/// 的应用整机断网。journal 记录了 Crossbow 曾开启代理且该端口现在无监听
+/// → 还原系统代理（按快照）。在 Builder 之前执行，任何后续 panic 都不再
+/// 影响网络可用性。端口有监听（内核被收养/别的客户端占用同端口）则不动。
+#[cfg(any(target_os = "macos", windows))]
+fn clear_stale_system_proxy_early() {
+    let dir = data_dir_for_early_hooks();
+    let journal = dir.join("sysproxy-journal.json");
+    let Ok(raw) = std::fs::read_to_string(&journal) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let port = value.get("port").and_then(|p| p.as_u64()).unwrap_or(0) as u16;
+    if !stale_proxy_should_clear(Some(port), port_has_listener(port)) {
+        return;
+    }
+    eprintln!(
+        "stale system proxy: journal port {port} has no listener; restoring settings"
+    );
+    #[cfg(target_os = "macos")]
+    let backend = sysproxy::NetworkSetup;
+    #[cfg(windows)]
+    let backend = sysproxy::WinInet;
+    let manager = sysproxy::SysProxyManager::new(backend, journal);
+    if let Err(error) = manager.disable() {
+        eprintln!("stale system proxy restore failed: {error}");
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn clear_stale_system_proxy_early() {}
+
+/// 自愈判定（纯函数便于测试）：journal 记录了非零端口且该端口无监听。
+fn stale_proxy_should_clear(journal_port: Option<u16>, port_listening: bool) -> bool {
+    journal_port.is_some_and(|p| p > 0) && !port_listening
+}
+
+fn port_has_listener(port: u16) -> bool {
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+    TcpStream::connect_timeout(
+        &SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        Duration::from_millis(300),
+    )
+    .is_ok()
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn data_dir_for_early_hooks() -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join("Library/Application Support/com.richard.crossbow"))
+            .expect("HOME unset; cannot locate data dir")
+    }
+    #[cfg(windows)]
+    {
+        std::env::var_os("APPDATA")
+            .map(std::path::PathBuf::from)
+            .map(|h| h.join("com.richard.crossbow"))
+            .expect("APPDATA unset; cannot locate data dir")
+    }
+}
+
 pub fn run() {
+    // The tray helper only hosts AppKit. Startup diagnostics and proxy
+    // recovery belong to the desktop process that owns the app state.
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(tray_helper::ARG)) {
+        if let Err(error) = tray_helper::run() {
+            eprintln!("macOS tray helper: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    install_panic_hook();
+    clear_stale_system_proxy_early();
     #[cfg(target_os = "windows")]
     deelevate_if_needed();
     tauri::Builder::default()
@@ -3949,6 +4096,7 @@ pub fn run() {
                 proxy_op: Mutex::new(()),
                 sysproxy,
                 mode: Mutex::new("rule".to_string()),
+                #[cfg(not(target_os = "macos"))]
                 tray: Mutex::new(None),
                 ws: WsHub::default(),
                 data_dir: data_dir.clone(),
@@ -3984,23 +4132,20 @@ pub fn run() {
             }
 
             // 托盘
-            let menu = build_tray_menu(app.handle())?;
-            let tray = TrayIconBuilder::new()
-                // macOS uses a template; Windows needs a visible colored tray icon.
-                .icon(if cfg!(target_os = "macos") {
-                    tauri::include_image!("icons/tray-icon.png")
-                } else {
-                    tauri::include_image!("icons/32x32.png")
-                })
-                .icon_as_template(cfg!(target_os = "macos"))
-                .menu(&menu)
-                .show_menu_on_left_click(true)
-                .tooltip("Crossbow")
-                .on_menu_event(handle_menu)
-                .build(app)?;
-            *app.state::<AppState>().tray.lock().unwrap_or_else(|e| e.into_inner()) = Some(tray);
             #[cfg(target_os = "macos")]
-            tray_speed::install_menu_observer(app.handle());
+            tray_speed::install(app.handle())?;
+            #[cfg(not(target_os = "macos"))]
+            {
+                let menu = tray_menu::build(app.handle(), &tray_menu_entries(app.handle()))?;
+                let tray = TrayIconBuilder::new()
+                    .icon(tauri::include_image!("icons/32x32.png"))
+                    .menu(&menu)
+                    .show_menu_on_left_click(true)
+                    .tooltip("Crossbow")
+                    .on_menu_event(|app, event| handle_menu(app, event.id().as_ref()))
+                    .build(app)?;
+                *app.state::<AppState>().tray.lock().unwrap_or_else(|e| e.into_inner()) = Some(tray);
+            }
 
             // 收养的外部内核不走状态回调：这里补挂托盘速率与节点菜单数据
             sync_tray_traffic(app.handle());
@@ -4194,6 +4339,17 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_proxy_clear_truth_table() {
+        // journal 记录了端口且无监听 → 清理
+        assert!(stale_proxy_should_clear(Some(7898), false));
+        // 端口有监听（内核被收养/其他客户端占用）→ 不动
+        assert!(!stale_proxy_should_clear(Some(7898), true));
+        // journal 无记录（port 0 / 文件缺失）→ 不动
+        assert!(!stale_proxy_should_clear(Some(0), false));
+        assert!(!stale_proxy_should_clear(None, false));
+    }
 
     #[test]
     fn failed_save_restores_memory_and_preserves_previous_disk_state() {

@@ -1,4 +1,5 @@
 import ProfileSwitcher from "./components/ProfileSwitcher";
+import { UpdateEntry } from "./components/UpdateEntry";
 import { parseNavigation, type NavigationTarget } from "./workflow";
 import { ButtonBase, Button } from "./components/Button";
 import { notify } from "./notifications/service";
@@ -128,8 +129,15 @@ export default function App() {
       } catch { /* The switcher exposes its own read failure and retry. */ }
     };
     void refresh();
+    // 后端事件：托盘菜单切换配置也走 set_active_profile，前端据此同步
+    // 页头配置名并转发 DOM 事件（Home 等既有监听者一并刷新）。
+    const unBackend = ipc.onProfileSwitched(() => {
+      if (!alive) return;
+      window.dispatchEvent(new CustomEvent("cb:profile-switched"));
+      void refresh();
+    });
     window.addEventListener("cb:profile-switched",refresh);
-    return () => { alive=false; window.removeEventListener("cb:profile-switched",refresh); };
+    return () => { alive=false; window.removeEventListener("cb:profile-switched",refresh); void unBackend.then((off)=>off()); };
   }, [page]);
 
   const refreshCoreLabel = () => {
@@ -273,6 +281,13 @@ export default function App() {
           ))}
         </nav>
         <div className="cb-global-tools">
+          {capabilities?.app_update && (
+            <UpdateEntry onOpen={() => {
+              setPage("settings");
+              setSettingSection("app");
+              setDestination({ page: "settings", settingSection: "app", control: "cb-update-status" });
+            }} />
+          )}
           <ProfileSwitcher currentName={profileName} onManage={()=>{setConfigTab("sources");go("profiles")}}/>
           <Button
             context="toolbar"
@@ -350,7 +365,7 @@ export default function App() {
                   </ButtonBase>
                 ))}
               </nav>
-              <SettingsPage section={settingSection} capabilities={capabilities} focusControl={destination?.control} />
+              <SettingsPage section={settingSection} capabilities={capabilities} focusTarget={destination} />
             </div>
           )}
         </div>

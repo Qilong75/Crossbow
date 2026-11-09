@@ -117,14 +117,22 @@ export default function ProfilesPage({
     };
   }, [importPaths]);
 
-  const run = async (key: string, fn: () => Promise<unknown>) => {
+  const run = async (
+    key: string,
+    fn: () => Promise<unknown>,
+    meta?: { successMsg?: string; import?: boolean },
+  ) => {
     setBusy(key);
     try {
-      const outcome=await notify.run(`profile-${key}`, t("profiles.title"), fn, undefined, {
+      const outcome=await notify.run(`profile-${key}`, t("profiles.title"), fn,
+        meta?.successMsg,
+        {
         feedback: /^(update|activate|remove|interval|rename)-/.test(key)
           ? "error-only"
           : "task",
         titleKey: "profiles.title",
+        // 条 7（Ref #369）：导入成功的下一步是选节点
+        nextActions: meta?.import ? ["nodes"] : undefined,
       });
       if(outcome.ok&&key.startsWith("activate-"))window.dispatchEvent(new CustomEvent("cb:profile-switched"));
       await refresh();
@@ -132,15 +140,23 @@ export default function ProfilesPage({
       setBusy(null);
     }
   };
-  const run2 = run;
+  const run2 = (
+    key: string,
+    fn: () => Promise<unknown>,
+    meta?: { successMsg?: string; import?: boolean },
+  ) => run(key, fn, meta);
 
   const chosenFiles = async (files: FileList | null) => {
     if (!files?.length) return;
     for (const f of Array.from(files)) {
-      await run(f.name, async () => {
-        const text = await f.text();
-        return ipc.importProfileContent(f.name.replace(/\.[^.]+$/, ""), text);
-      });
+      await run(
+        f.name,
+        async () => {
+          const text = await f.text();
+          return ipc.importProfileContent(f.name.replace(/\.[^.]+$/, ""), text);
+        },
+        { successMsg: t("toast.imported", { url: f.name }), import: true },
+      );
     }
     // 导入完成后与 URL 导入一致：自动关闭弹窗（失败会以通知卡提示，可重开重试）
     setImporting(false);
@@ -154,11 +170,15 @@ export default function ProfilesPage({
     if(focusProfileId&&selected?.id===focusProfileId){const frame=requestAnimationFrame(()=>document.getElementById("cb-profile-detail")?.focus());return()=>cancelAnimationFrame(frame);}
   },[focusProfileId,selected?.id]);
   const importUrl = () =>
-    run("import", async () => {
-      await ipc.importProfileUrl(url.trim());
-      setUrl("");
-      setImporting(false);
-    });
+    run(
+      "import",
+      async () => {
+        await ipc.importProfileUrl(url.trim());
+        setUrl("");
+        setImporting(false);
+      },
+      { successMsg: t("toast.imported", { url: url.trim() }), import: true },
+    );
   return (
     <div className="cb-profiles-page">
       <PageHead
