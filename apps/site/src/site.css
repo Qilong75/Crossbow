@@ -68,7 +68,9 @@ main:focus { outline: none; }
 .nav-github { margin-right: 7px; position: relative; }
 .nav-github::after { content: ''; position: absolute; right: -5px; height: 16px; width: 1px; background: var(--line); }
 .nav-github svg { width: 19px; height: 19px; }
-.language-tool { width: 64px; gap: 5px; font-size: 12px; font-weight: 500; }
+.language-tool { width: 40px; }
+.theme-toggle-icon { display: inline-flex; }
+.theme-toggle-icon svg { width: 17px; height: 17px; display: block; }
 .nav-download { display: inline-flex; min-height: 40px; align-items: center; justify-content: center; gap: 8px; margin-left: 12px; padding: 6px 17px; border-radius: 7px; background: var(--button); color: var(--on-button); font-size: 12px; font-weight: 600; white-space: nowrap; transition: background 150ms ease, transform 120ms var(--ease); }
 .nav-download svg { width: 16px; height: 16px; }
 .nav-download[aria-current=page] { outline: 2px solid var(--line-strong); outline-offset: 3px; }

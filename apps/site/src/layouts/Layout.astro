@@ -73,8 +73,7 @@ const nav = [
           </a>
           <div class="preference-anchor" data-pref>
             <button class="nav-tool language-tool" data-pref-button aria-expanded="false" aria-haspopup="true" title={t(lang, "外观")}>
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2" /><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5 5l1.9 1.9M17.1 17.1 19 19M19 5l-1.9 1.9M6.9 17.1 5 19" /></svg>
-              <span data-theme-label aria-hidden="true">◐</span>
+              <span class="theme-toggle-icon" data-theme-icon aria-hidden="true"></span>
             </button>
             <form class="preference-popover" data-theme-pop hidden>
               <fieldset>
@@ -88,7 +87,6 @@ const nav = [
           <div class="preference-anchor" data-pref>
             <button class="nav-tool language-tool" data-pref-button aria-expanded="false" aria-haspopup="true" title={t(lang, "语言")}>
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 5h9M8.5 3v2M11.5 5c-.7 3.9-3 7-6.5 9M6 9.5c1.6 2.6 4 4.6 7 5.5" /><path d="m13.5 21 4-9 4 9M14.8 18h5.4" /></svg>
-              <span>{lang === "en" ? "EN" : "中"}</span>
             </button>
             <form class="preference-popover" data-lang-pop hidden>
               <fieldset>
@@ -132,19 +130,20 @@ const nav = [
       const THEME_KEY = "crossbow.site.theme";
       const LANGUAGE_KEY = "crossbow.site.language";
       const read = () => { try { return localStorage.getItem(THEME_KEY) || "system"; } catch { return "system"; } };
+      const SUN_ICON = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2" /><path d="M12 2.5v2.6M12 18.9v2.6M2.5 12h2.6M18.9 12h2.6M5 5l1.9 1.9M17.1 17.1 19 19M19 5l-1.9 1.9M6.9 17.1 5 19" /></svg>';
+      const MOON_ICON = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>';
       const paint = () => {
         const stored = read();
         const dark = stored === "dark" || (stored !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
         root.dataset.theme = dark ? "dark" : "light";
         document.querySelector('meta[name="theme-color"]')?.setAttribute("content", dark ? "#1a1c21" : "#ffffff");
-        const label = document.querySelector("[data-theme-label]");
-        if (label) label.textContent = stored === "dark" ? "☾" : stored === "light" ? "☀" : "◐";
+        const icon = document.querySelector("[data-theme-icon]");
+        // 图标反映当前主题：深色 = 月亮，浅色 = 太阳
+        if (icon) icon.innerHTML = dark ? MOON_ICON : SUN_ICON;
+        const radio = document.querySelector(`[data-theme-pop] input[value="${stored}"]`);
+        if (radio) radio.checked = true;
       };
-      // 首屏引导只设 data-theme；此处把存储值回填到下拉的选中项
       paint();
-      const stored = read();
-      const themeRadio = document.querySelector<HTMLInputElement>(`[data-theme-pop] input[value="${stored}"]`);
-      if (themeRadio) themeRadio.checked = true;
 
       // 下拉开合：点击按钮切换、点击外部与 Escape 关闭
       document.querySelectorAll<HTMLElement>("[data-pref]").forEach((anchor) => {
@@ -170,9 +169,9 @@ const nav = [
       document.querySelector("[data-lang-pop]")?.addEventListener("change", (e) => {
         const value = (e.target as HTMLInputElement).value;
         try { localStorage.setItem(LANGUAGE_KEY, value === "en" ? "en" : "zh-CN"); } catch {}
-        // trailingSlash: never —— /en 不带尾斜杠；根路径两种语言都是 "/"
-        const rest = location.pathname.replace(/^\/en/, "").replace(/\/+$/, "");
-        const target = value === "en" ? "/en" + rest : rest || "/";
+        // trailingSlash: never —— /zh 不带尾斜杠；根路径两种语言都是 "/"
+        const rest = location.pathname.replace(/^\/zh/, "").replace(/\/+$/, "");
+        const target = value === "zh" ? "/zh" + rest : rest || "/";
         location.href = new URL(target, location.origin).href;
       });
 

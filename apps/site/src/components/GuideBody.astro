@@ -5,7 +5,7 @@ import { REPO, LATEST } from "../site-meta";
 const { lang } = Astro.props;
 const _ = (key: string) => t(lang, key);
 const base = import.meta.env.BASE_URL.replace(/\/+$/, "");
-const route = (p: string) => `${base}${lang === "en" ? "/en" : ""}${p === "/" ? "/" : p}`;
+const route = (p: string) => `${base}${lang === "zh" ? "/zh" : ""}${p === "/" ? "/" : p}`;
 
 const CODE_FILTER = `function main(config) {
   // 只保留名字含「香港」或「JP」的节点

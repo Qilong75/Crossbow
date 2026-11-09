@@ -7,7 +7,7 @@ const { lang, standalone = false } = Astro.props;
 const _ = (key: string) => t(lang, key);
 const Heading = standalone ? "h1" : "h2";
 const base = import.meta.env.BASE_URL.replace(/\/+$/, "");
-const route = (p: string) => `${base}${lang === "en" ? "/en" : ""}${p === "/" ? "/" : p}`;
+const route = (p: string) => `${base}${lang === "zh" ? "/zh" : ""}${p === "/" ? "/" : p}`;
 ---
 
 <section id="download" class="shell content-section download-section">

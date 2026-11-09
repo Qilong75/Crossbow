@@ -7,7 +7,7 @@ import DownloadSection from "./DownloadSection.astro";
 const { lang } = Astro.props;
 const _ = (key: string) => t(lang, key);
 const base = import.meta.env.BASE_URL.replace(/\/+$/, "");
-const route = (p: string) => `${base}${lang === "en" ? "/en" : ""}${p === "/" ? "/" : p}`;
+const route = (p: string) => `${base}${lang === "zh" ? "/zh" : ""}${p === "/" ? "/" : p}`;
 
 const FEATURES = [
   { icon: "M4 5h16v14H4z", icon2: "M4 10h16M9 5v14", title: _("订阅管理"), text: _("多种方式导入订阅，查看流量、到期和更新状态；更新后显示节点变更摘要，失败保留旧配置。") },
