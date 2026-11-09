@@ -18,6 +18,7 @@ use tauri_plugin_deep_link::DeepLinkExt as _;
 
 #[cfg(target_os = "macos")]
 mod macos_icon;
+mod authorization;
 mod coexist;
 mod config_transition;
 mod core_manager;
@@ -33,6 +34,7 @@ mod process;
 mod platform;
 mod update_check;
 mod scheduler;
+mod shutdown;
 mod workflow;
 mod sysproxy;
 #[cfg(target_os = "macos")]
@@ -59,6 +61,7 @@ use sysproxy::{SysProxyManager, SysProxyStatus};
 use ws_bridge::WsHub;
 
 pub struct AppState {
+    exit: shutdown::ExitState,
     /// 轻量交接退出：RunEvent::Exit 时跳过清理（内核留给系统收养）。
     handoff: std::sync::atomic::AtomicBool,
     /// Explicit updater restart handoff; separate from the one-shot window guard.
@@ -260,7 +263,9 @@ fn render_current(
 /// 渲染当前档案并启动内核；已在运行时报错（用 `restart_core`）。
 /// 安全模式（safe_mode）下跳过覆写链。
 fn start_core(state: &AppState) -> Result<(), String> {
+    state.exit.ensure_open()?;
     let _op = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
+    state.exit.ensure_open()?;
     // A diagnostic result can predate a successful rollback or another start.
     // Starting means ensure-running, never stop/reject an already healthy core.
     match state.core().status() {
@@ -453,6 +458,7 @@ fn commit_config_change_inner(
     exit_safe_mode: bool,
 ) -> Result<(), String> {
     let _op = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
+    state.exit.ensure_open()?;
     let _recovery = config_transition::RecoveryOwner::enter(&state.config_transition);
     let before = state
         .store
@@ -743,13 +749,6 @@ fn restore_store(store: &Mutex<Store>, before: &crossbow_core::StoreSchema) -> R
     let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
     *store.data_mut() = before.clone();
     store.save().map_err(|e| e.to_string())
-}
-
-/// 内核没回来时，按退出路径把系统代理还回去，避免代理指向一个死端口。
-fn recover_network_if_core_dead(state: &AppState) {
-    if let Err(error) = recover_config_network(state) {
-        eprintln!("network recovery failed: {error}");
-    }
 }
 
 fn recover_config_network(state: &AppState) -> Result<(), String> {
@@ -1451,6 +1450,7 @@ async fn core_start(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn core_stop(state: State<'_, AppState>) -> Result<(), String> {
     let _operation = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
+    state.exit.ensure_open()?;
     if state.core().stop() {
         Ok(())
     } else {
@@ -1671,6 +1671,7 @@ fn core_install_inner(app: AppHandle, engine: Option<String>) -> Result<CoreBina
     let state = app.state::<AppState>();
     // 与启动链互斥：换核期间不允许并发的 start_core 拿到半新半旧的槽位
     let _op = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
+    state.exit.ensure_open()?;
     let new_core = CoreManager::new(info.clone(), data_dir.join("runtime"));
     new_core.set_callback(core_status_callback(app.clone()));
     state.core().stop();
@@ -1950,8 +1951,10 @@ fn update_start_download(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn update_install(app: AppHandle) -> Result<(), String> {
-    update_check::install(&app)
+async fn update_install(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || update_check::install(&app))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -2158,6 +2161,7 @@ fn sysproxy_status(state: State<AppState>) -> SysProxyStatus {
 
 /// 总开关：开启 = 确保内核运行 + 设置系统代理；关闭 = 还原系统代理（内核保持）。
 fn toggle_sysproxy_state(state: &AppState) -> Result<(), String> {
+    state.exit.ensure_open()?;
     // Reject before starting a core or changing any persistent state.
     if !platform::capabilities().system_proxy {
         return Err("当前平台仅支持显式 HTTP/SOCKS 代理，尚未支持系统代理接管".into());
@@ -2167,6 +2171,7 @@ fn toggle_sysproxy_state(state: &AppState) -> Result<(), String> {
         wait_core_running(state)?;
     }
     let _operation = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
+    state.exit.ensure_open()?;
     let store = state.store.lock().unwrap();
     let port = store.data().engine.mixed_port;
     let tun_enabled = store.data().engine.tun_enable;
@@ -2572,23 +2577,28 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
     const MAX_CONSECUTIVE_FAILURES: u8 = 3;
     let handle = app.clone();
     std::thread::spawn(move || {
+        let _background = authorization::BackgroundGuard::enter();
         let mut failures = 0u8;
         let mut drift_strikes = 0u8;
         let mut reestablish_count = 0u8;
         let mut reestablish_cooldown_until = std::time::Instant::now();
         let mut reported_giveup = false;
-        let mut reported_disable_failure = false;
+        let mut reported_recovery_failure = false;
+        let mut external_proxy_notice = sysproxy::ExternalProxyNotice::default();
         loop {
             let cycle_started = std::time::Instant::now();
             if let Some(state) = handle.try_state::<AppState>() {
                 let tun_enabled = state.store.lock().unwrap().data().engine.tun_enable;
                 let core_status = state.core().status();
-                if !tun_enabled || core_status == CoreStatus::Starting {
+                if !tun_enabled || core_status == CoreStatus::Starting || state.exit.ensure_open().is_err() {
+                    if !tun_enabled && external_proxy_notice.update(false) == Some(false) {
+                        notifications::resolve(&handle, "tun-external-proxy");
+                    }
                     failures = 0;
                     drift_strikes = 0;
                     reestablish_count = 0;
                     reported_giveup = false;
-                    reported_disable_failure = false;
+                    reported_recovery_failure = false;
                 } else {
                     // 接管漂移（#154）：捕获路由丢失后，连通性探测可能假绿
                     // （gstatic 存在国内可达地址），显式检查接管本体。漂移
@@ -2661,6 +2671,15 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                                         "tun takeover re-establish failed: {error}"
                                     );
                                     failures = failures.saturating_add(1);
+                                    if !reported_recovery_failure {
+                                        reported_recovery_failure = true;
+                                        let mut notice = notifications::Notice::new(
+                                            notifications::Kind::Warning, "tun.manualRecovery", "tun-health");
+                                        notice.details = error;
+                                        notice.duration = Some(0);
+                                        notice.actions = vec![notifications::Action::Settings, notifications::Action::Diagnostics];
+                                        notifications::publish(&handle, notice);
+                                    }
                                 }
                             }
                             skip_probe = true;
@@ -2670,8 +2689,30 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                     let probe = if core_status == CoreStatus::Running {
                         // A second proxy client may re-enable a stale macOS
                         // proxy after Crossbow has established its route.
-                        if let Err(error) = state.sysproxy.clear_external_for_tun() {
-                            eprintln!("tun system proxy cleanup failed: {error}");
+                        let conflict = sysproxy::check_external_proxy_for_tun(
+                            &state.core_op,
+                            || {
+                                state.exit.ensure_open().is_ok()
+                                    && state.store.lock().unwrap().data().engine.tun_enable
+                            },
+                            || state.sysproxy.external_proxy_conflict_for_tun(),
+                        );
+                        match external_proxy_notice.update(conflict) {
+                            Some(true) => {
+                                let mut notice = notifications::Notice::new(
+                                    notifications::Kind::Warning,
+                                    "tun.externalProxy",
+                                    "tun-external-proxy",
+                                );
+                                notice.duration = Some(0);
+                                notice.actions = vec![
+                                    notifications::Action::Settings,
+                                    notifications::Action::Diagnostics,
+                                ];
+                                notifications::publish(&handle, notice);
+                            }
+                            Some(false) => notifications::resolve(&handle, "tun-external-proxy"),
+                            None => {}
                         }
                         if skip_probe {
                             // 重建立/放弃周期跳过连通性探测
@@ -2687,11 +2728,11 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
 
                     match probe {
                         Ok(_) => {
-                            if !skip_probe && !drifted {
+                            if !skip_probe && !drifted && !cooling {
                                 notifications::resolve(&handle, "tun-health");
+                                reported_recovery_failure = false;
                             }
                             failures = 0;
-                            reported_disable_failure = false;
                         }
                         Err(error) => {
                             failures = failures.saturating_add(1);
@@ -2705,7 +2746,7 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                                     match disable_tun_if_enabled(&state) {
                                         Ok(()) => {
                                             failures = 0;
-                                            reported_disable_failure = false;
+                                            reported_recovery_failure = false;
                                             let _ = handle.emit("tun://status", false);
                                             let _ = handle
                                                 .emit("sysproxy://status", state.sysproxy.status());
@@ -2731,15 +2772,15 @@ fn spawn_tun_health_monitor(app: &AppHandle) {
                                             let _ = handle
                                                 .emit("sysproxy://status", state.sysproxy.status());
                                             refresh_tray(&handle);
-                                            if !reported_disable_failure {
+                                            if !reported_recovery_failure {
                                                 notifications::result(&handle, "tun-health", "tun.disableFailed", Err(disable_error.clone()));
-                                                reported_disable_failure = true;
+                                                reported_recovery_failure = true;
                                             }
                                         }
                                     }
                                 } else {
                                     failures = 0;
-                                    reported_disable_failure = false;
+                                    reported_recovery_failure = false;
                                 }
                             }
                         }
@@ -3348,45 +3389,131 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
-/// Also used by Windows updater: its process::exit bypasses RunEvent::Exit.
-pub(crate) fn cleanup_before_process_exit(app: &AppHandle, preserve_handoff: bool) {
-    if let Some(state) = app.try_state::<AppState>() {
-        // 退出时不允许 root 内核补杀弹授权框：杀不掉就留给系统，
-        // 下次启动的收养/预绑定检查会处理。
-        core_manager::ROOT_KILL_PROMPT_DISABLED
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        state.ws.unsubscribe_all();
-        let _ = std::fs::remove_file(state.data_dir.join("app.pid"));
-        let handoff = state.handoff.load(std::sync::atomic::Ordering::SeqCst);
-        let updating = state
-            .update_handoff
-            .load(std::sync::atomic::Ordering::SeqCst);
-        if !preserve_handoff || (!handoff && !updating) {
-            state.sysproxy.begin_shutdown();
-            let tun_enabled = state.store.lock().unwrap().data().engine.tun_enable;
-            if tun_enabled {
-                // 特权内核停掉之后，立刻按记住的记录还原系统代理。
-                if state.core().stop() {
-                    recover_network_if_core_dead(&state);
-                }
-            } else {
-                state.core().stop();
-                recover_network_if_core_dead(&state);
-            }
-        }
+/// 可取消的退出准备；只从工作线程调用，恢复成功前保留内核和会话资源。
+pub(crate) fn cleanup_before_process_exit(
+    app: &AppHandle,
+    preserve_handoff: bool,
+) -> Result<(), String> {
+    let Some(state) = app.try_state::<AppState>() else {
+        return Ok(());
+    };
+    if state.exit.ready() {
+        return Ok(());
     }
+    state.exit.begin();
+    let _operation = state
+        .core_op
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if state.exit.ready() {
+        return Ok(());
+    }
+    let handed_off = preserve_handoff
+        && (state.handoff.load(std::sync::atomic::Ordering::SeqCst)
+            || state
+                .update_handoff
+                .load(std::sync::atomic::Ordering::SeqCst));
+    let tun_enabled = state.store.lock().unwrap().data().engine.tun_enable;
+    let result = state.exit.finish(
+        handed_off,
+        || state.sysproxy.prepare_exit(tun_enabled),
+        || {
+            // 用户主动退出允许完成关闭 root 内核所需的授权，拒绝则取消退出。
+            if !state.core().stop_for_exit() {
+                return Err("内核未能停止，已取消退出，请重试".into());
+            }
+            Ok(())
+        },
+        || {
+            state.ws.unsubscribe_all();
+            let _ = std::fs::remove_file(state.data_dir.join("app.pid"));
+        },
+    );
+    if result.is_err() {
+        state.sysproxy.cancel_shutdown();
+    }
+    result
 }
 
-/// Called after installation succeeds and before requesting an event-loop restart.
-/// Persisting the descriptor must succeed before Exit may skip normal cleanup.
+/// 安装器尚未启动就先恢复网络，因为 Windows updater 的退出回调不能取消退出。
+#[cfg(windows)]
+pub(crate) fn prepare_windows_update_exit(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if !state.exit.begin() {
+        return Err("应用已经在准备退出".into());
+    }
+    let _operation = state
+        .core_op
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let tun_enabled = state.store.lock().unwrap().data().engine.tun_enable;
+    let result = state.sysproxy.prepare_exit(tun_enabled);
+    if result.is_err() {
+        state.exit.cancel();
+    }
+    result
+}
+
+/// 安装器启动失败时保留运行中的内核，恢复操作与退出重试入口。
+#[cfg(windows)]
+pub(crate) fn cancel_windows_update_exit(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.sysproxy.cancel_shutdown();
+    state.exit.cancel();
+}
+
+/// 更新接力保留内核；没有可接力的内核时必须在不可取消的 restart 前恢复网络。
 pub(crate) fn prepare_update_restart(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let _operation = state.core_op.lock().unwrap_or_else(|e| e.into_inner());
-    let handed_off = state.core().prepare_handoff()?.is_some();
+    if !state.exit.begin() {
+        return Err("应用已经在准备退出".into());
+    }
+    let handed_off = {
+        let _operation = state
+            .core_op
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.core().prepare_handoff()
+    };
+    let handed_off = match handed_off {
+        Ok(value) => value.is_some(),
+        Err(error) => {
+            state.exit.cancel();
+            return Err(error);
+        }
+    };
     state
         .update_handoff
         .store(handed_off, std::sync::atomic::Ordering::SeqCst);
-    Ok(())
+    cleanup_before_process_exit(app, true)
+}
+
+/// 第一阶段阻止退出，后台完成恢复；失败时回到可重试状态并展示统一通知。
+fn request_process_exit(app: &AppHandle, code: Option<i32>) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    if !state.exit.begin() {
+        return;
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || match cleanup_before_process_exit(&handle, false) {
+        Ok(()) => handle.exit(code.unwrap_or(0)),
+        Err(error) => {
+            let state = handle.state::<AppState>();
+            let _ = handle.emit("sysproxy://status", state.sysproxy.status());
+            refresh_tray(&handle);
+            show_main_window(&handle);
+            let mut notice = notifications::Notice::new(
+                notifications::Kind::Error,
+                "app.exitBlocked",
+                "app-exit",
+            );
+            notice.details = error;
+            notice.actions = vec![notifications::Action::Diagnostics];
+            notifications::publish(&handle, notice);
+        }
+    });
 }
 
 /// 系统代理总开关（托盘与首页共用）。
@@ -3407,6 +3534,7 @@ fn toggle_sysproxy(app: &AppHandle) -> Result<(), String> {
 /// 主窗口销毁以释放 webview 内存；ws 订阅随窗口销毁一并退订。
 fn lightweight_quit(app: &AppHandle) {
     let state = app.state::<AppState>();
+    if state.exit.ensure_open().is_err() { return; }
     let Some(_pid) = state.core().detach() else {
         // 内核未运行：没有可交接的东西，等价于普通关窗（隐藏到托盘）
         show_no_more(app);
@@ -3782,6 +3910,7 @@ pub fn run() {
             }
 
             app.manage(AppState {
+                exit: shutdown::ExitState::default(),
                 handoff: std::sync::atomic::AtomicBool::new(false),
                 update_handoff: std::sync::atomic::AtomicBool::new(false),
                 safe_mode: std::sync::atomic::AtomicBool::new(false),
@@ -4007,23 +4136,24 @@ pub fn run() {
                 // handoff 时阻止退出（进程保留、托盘常驻、内核照跑）。
                 // swap 一次性消费：只拦截「轻量关窗」这一次请求，用完即复位，
                 // 否则粘性标志会连后续 cmd-Q / quit 事件一起拦死，进程永远杀不掉。
-                tauri::RunEvent::ExitRequested {
-                    code: None, api, ..
-                } => {
+                tauri::RunEvent::ExitRequested { code, api, .. } => {
                     if let Some(state) = app.try_state::<AppState>() {
-                        if state
-                            .handoff
-                            .swap(false, std::sync::atomic::Ordering::SeqCst)
+                        if code.is_none()
+                            && state
+                                .handoff
+                                .swap(false, std::sync::atomic::Ordering::SeqCst)
                         {
                             api.prevent_exit();
+                        } else if !state.exit.ready() {
+                            api.prevent_exit();
+                            request_process_exit(app, code);
                         }
                     }
                 }
-                // 真正退出：还原系统代理、收内核（handoff 之外的所有路径）。
+                // 所有可失败的网络恢复都已在 ExitRequested 前置阶段完成。
                 tauri::RunEvent::Exit => {
                     #[cfg(target_os = "linux")]
                     notifications::shutdown(app);
-                    cleanup_before_process_exit(app, true);
                 }
                 _ => {}
             }

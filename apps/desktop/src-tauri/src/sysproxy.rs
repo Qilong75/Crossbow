@@ -13,6 +13,31 @@ use std::sync::{
 
 use serde::{Deserialize, Serialize};
 
+/// 与 TUN 开关共用操作锁，排队后重新读取开关，再执行只读检测。
+pub(crate) fn check_external_proxy_for_tun(
+    operation: &Mutex<()>,
+    tun_enabled: impl FnOnce() -> bool,
+    detect: impl FnOnce() -> bool,
+) -> bool {
+    let _operation = operation.lock().unwrap_or_else(|error| error.into_inner());
+    tun_enabled() && detect()
+}
+
+/// 同一次外部代理冲突只展示一次提示，恢复后才允许提示新冲突。
+#[derive(Default)]
+pub(crate) struct ExternalProxyNotice(bool);
+
+impl ExternalProxyNotice {
+    /// Some(true) 展示、Some(false) 解除，None 表示提示状态无需变化。
+    pub(crate) fn update(&mut self, conflict: bool) -> Option<bool> {
+        if self.0 == conflict {
+            return None;
+        }
+        self.0 = conflict;
+        Some(conflict)
+    }
+}
+
 /// 默认绕过列表（本机/局域网直连）。
 #[cfg(target_os = "macos")]
 const BYPASS_DOMAINS: &[&str] = &[
@@ -36,6 +61,14 @@ pub trait SysProxyBackend: Send + Sync {
     fn service_snapshot(&self, service: &str) -> Result<ServiceSnapshot, String>;
     /// 按快照还原单个服务设置。
     fn restore_service(&self, service: &str, snap: &ServiceSnapshot) -> Result<(), String>;
+
+    /// 交互授权后端在后台变更前预检，其他平台无需管理员弹窗。
+    fn restoration_requires_authorization(
+        &self,
+        _: &BTreeMap<String, ServiceSnapshot>,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
 
     /// 一次开启全部服务；平台后端可合并管理员授权。
     fn enable_services(&self, services: &[String], port: u16) -> Result<(), String> {
@@ -184,6 +217,7 @@ impl NetworkSetup {
         if commands.is_empty() {
             return Ok(());
         }
+        crate::authorization::require_interactive()?;
         let script = Self::batch_script(commands, restoring);
         let out = std::process::Command::new("/usr/bin/osascript")
             .args(["-e", "on run argv\ndo shell script (item 1 of argv) with administrator privileges\nend run", "--", &script])
@@ -265,6 +299,17 @@ impl NetworkSetup {
 
 #[cfg(target_os = "macos")]
 impl SysProxyBackend for NetworkSetup {
+    fn restoration_requires_authorization(
+        &self,
+        snapshots: &BTreeMap<String, ServiceSnapshot>,
+    ) -> Result<bool, String> {
+        for (service, snapshot) in snapshots {
+            if !Self::snapshot_matches(service, snapshot)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     fn list_services(&self) -> Result<Vec<String>, String> {
         let out = Self::run(&["-listallnetworkservices"])?;
         Ok(parse_services(&out))
@@ -482,6 +527,31 @@ impl<B: SysProxyBackend> SysProxyManager<B> {
     /// 退出开始后拒绝新开启请求；已有授权完成后先回滚，退出清理才可继续。
     pub(crate) fn begin_shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
+    }
+
+    /// 退出恢复失败后重新开放代理开关，内核仍由调用方保留。
+    pub(crate) fn cancel_shutdown(&self) {
+        self.shutting_down.store(false, Ordering::SeqCst);
+    }
+
+    /// 在内核仍运行时恢复原代理；失败保留日志并允许重新授权。
+    pub(crate) fn prepare_exit(&self, tun_enabled: bool) -> Result<(), String> {
+        self.begin_shutdown();
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let result = self.disable_locked().and_then(|()| {
+            if tun_enabled {
+                self.recover_tun_without_core_locked()
+            } else {
+                Ok(())
+            }
+        });
+        if result.is_err() {
+            self.cancel_shutdown();
+        }
+        result
     }
 
     /// 读取退出状态，不在主事件循环上等待 core_op。
@@ -755,8 +825,8 @@ impl<B: SysProxyBackend> SysProxyManager<B> {
         self.suspend_for_tun_locked()
     }
 
-    /// TUN 健康检查只清理外部代理；等待授权锁之后重新核对所有权。
-    pub(crate) fn clear_external_for_tun(&self) -> Result<(), String> {
+    /// 后台只检测外部代理，绝不修改网络或请求管理员授权。
+    pub(crate) fn external_proxy_conflict_for_tun(&self) -> bool {
         let _operation = self
             .operation
             .lock()
@@ -765,9 +835,42 @@ impl<B: SysProxyBackend> SysProxyManager<B> {
             || self.state.lock().unwrap().is_some()
             || self.external_endpoints().is_empty()
         {
+            return false;
+        }
+        true
+    }
+
+    /// 自动重建前检查外部代理，避免关闭后无法在后台再次挂起代理。
+    pub(crate) fn ensure_unattended_tun_rebuild(&self) -> Result<(), String> {
+        if self.external_proxy_conflict_for_tun() {
+            return Err("检测到外部系统代理，请手动操作 TUN 开关完成恢复".into());
+        }
+        self.ensure_unattended_tun_restore()
+    }
+
+    /// 自动关停 TUN 前先检查恢复权限，不能停掉内核后才发现需要授权。
+    pub(crate) fn ensure_unattended_tun_restore(&self) -> Result<(), String> {
+        let _operation = self
+            .operation
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.state.lock().unwrap().is_some() {
             return Ok(());
         }
-        self.suspend_for_tun_locked().map(|_| ())
+        let saved = match std::fs::read(self.tun_journal_path()) {
+            Ok(saved) => saved,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("读取 TUN 代理恢复日志失败：{error}")),
+        };
+        let suspended: SuspendedSysProxy =
+            serde_json::from_slice(&saved).map_err(|error| error.to_string())?;
+        if self
+            .backend
+            .restoration_requires_authorization(&suspended.snapshot)?
+        {
+            return Err("恢复原系统代理需要管理员授权，请手动操作 TUN 开关".into());
+        }
+        Ok(())
     }
 
     /// 已持有代理操作锁的内部实现。
@@ -1051,6 +1154,52 @@ mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
 
+    /// TUN 关闭在前一个锁持有者完成，排队的检测必须跳过外部代理。
+    #[test]
+    fn queued_background_check_rechecks_tun_after_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let operation = Arc::new(Mutex::new(()));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let detected = Arc::new(AtomicBool::new(false));
+        let lock = operation.lock().unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let queued_op = operation.clone();
+        let queued_flag = enabled.clone();
+        let queued_detected = detected.clone();
+        let check = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            check_external_proxy_for_tun(
+                &queued_op,
+                || queued_flag.load(Ordering::SeqCst),
+                || {
+                    queued_detected.store(true, Ordering::SeqCst);
+                    true
+                },
+            )
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        enabled.store(false, Ordering::SeqCst);
+        drop(lock);
+        assert!(!check.join().unwrap());
+        assert!(!detected.load(Ordering::SeqCst));
+        assert!(check_external_proxy_for_tun(&operation, || true, || true));
+    }
+
+    /// 用户关闭提示后重复检测不再次展示，只有冲突解除后才重新提示。
+    #[test]
+    fn external_proxy_notice_is_once_per_conflict() {
+        let mut notice = ExternalProxyNotice::default();
+        assert_eq!(notice.update(false), None);
+        assert_eq!(notice.update(true), Some(true));
+        for _ in 0..20 {
+            assert_eq!(notice.update(true), None);
+        }
+        assert_eq!(notice.update(false), Some(false));
+        assert_eq!(notice.update(false), None);
+        assert_eq!(notice.update(true), Some(true));
+    }
+
     #[test]
     fn windows_protocol_map_and_single_server_are_parsed_exactly() {
         let settings = WindowsProxyConfig {
@@ -1148,6 +1297,7 @@ mod tests {
         enabled: Mutex<HashSet<String>>,
         fail_on: Mutex<Vec<String>>,
         restore_fail_on: Mutex<Vec<String>>,
+        restore_needs_auth: AtomicBool,
         before_enable: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
         /// 各服务 enable 前的原设置（模拟第三方客户端已配置的场景）。
         presets: Mutex<BTreeMap<String, ServiceSnapshot>>,
@@ -1163,6 +1313,7 @@ mod tests {
                     enabled: Mutex::new(HashSet::new()),
                     fail_on: Mutex::new(vec![]),
                     restore_fail_on: Mutex::new(vec![]),
+                    restore_needs_auth: AtomicBool::new(false),
                     before_enable: Mutex::new(None),
                     presets: Mutex::new(BTreeMap::new()),
                     restored: Mutex::new(BTreeMap::new()),
@@ -1181,6 +1332,12 @@ mod tests {
     }
 
     impl SysProxyBackend for FakeBackend {
+        fn restoration_requires_authorization(
+            &self,
+            _: &BTreeMap<String, ServiceSnapshot>,
+        ) -> Result<bool, String> {
+            Ok(self.inner.restore_needs_auth.load(Ordering::SeqCst))
+        }
         fn list_services(&self) -> Result<Vec<String>, String> {
             Ok(self.inner.services.clone())
         }
@@ -1242,6 +1399,30 @@ mod tests {
     }
 
     type FakeManager = SysProxyManager<FakeBackend>;
+
+    /// 后台检测只观察第三方代理，不应关闭它或生成恢复日志。
+    #[test]
+    fn background_detection_does_not_change_external_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::new(&["Wi-Fi"]).with_preset(
+            "Wi-Fi",
+            ServiceSnapshot {
+                web: Some(ProxyEndpoint {
+                    host: "127.0.0.1".into(),
+                    port: 7890,
+                }),
+                ..ServiceSnapshot::default()
+            },
+        );
+        backend.enable_service("Wi-Fi", 7890).unwrap();
+        let manager = manager_with(backend.clone(), &dir);
+        for _ in 0..3 {
+            assert!(manager.external_proxy_conflict_for_tun());
+        }
+        assert!(backend.inner.enabled.lock().unwrap().contains("Wi-Fi"));
+        assert!(!manager.tun_journal_path().exists());
+        assert!(!dir.path().join("journal.json").exists());
+    }
 
     fn manager_with(backend: FakeBackend, dir: &tempfile::TempDir) -> FakeManager {
         SysProxyManager::new(backend, dir.path().join("journal.json"))
@@ -1359,6 +1540,75 @@ mod tests {
         assert!(!dir.path().join("journal.json").exists());
     }
 
+    /// 退出恢复被取消时保留代理与恢复日志，授权修复后可继续使用并重新退出。
+    #[test]
+    fn failed_exit_restore_reopens_proxy_operations_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::new(&["Wi-Fi"]);
+        let manager = manager_with(backend.clone(), &dir);
+        manager.enable(7897).unwrap();
+        backend
+            .inner
+            .restore_fail_on
+            .lock()
+            .unwrap()
+            .push("Wi-Fi".into());
+        assert!(manager.prepare_exit(false).is_err());
+        assert!(manager.status().enabled);
+        assert!(dir.path().join("journal.json").exists());
+        assert!(!manager.shutting_down.load(Ordering::SeqCst));
+        backend.inner.restore_fail_on.lock().unwrap().clear();
+        manager.enable(7897).unwrap();
+        manager.prepare_exit(false).unwrap();
+        assert!(!manager.status().enabled);
+        assert!(!dir.path().join("journal.json").exists());
+    }
+
+    /// 自动恢复预检需要授权时只返回提示，原 TUN 快照与当前代理不得被改写。
+    #[test]
+    fn unattended_restore_preflight_keeps_saved_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FakeBackend::new(&["Wi-Fi"]);
+        let manager = manager_with(backend.clone(), &dir);
+        manager.suspend_for_tun().unwrap();
+        let before = std::fs::read(manager.tun_journal_path()).unwrap();
+        backend
+            .inner
+            .restore_needs_auth
+            .store(true, Ordering::SeqCst);
+        assert!(manager
+            .ensure_unattended_tun_restore()
+            .unwrap_err()
+            .contains("手动"));
+        assert_eq!(std::fs::read(manager.tun_journal_path()).unwrap(), before);
+        assert!(backend.inner.restored.lock().unwrap().is_empty());
+        backend
+            .inner
+            .restore_needs_auth
+            .store(false, Ordering::SeqCst);
+        assert!(manager.ensure_unattended_tun_restore().is_ok());
+    }
+
+    /// 恢复无需授权也可能需要重新挂起外部代理，后台重建应提前拒绝。
+    #[test]
+    fn unattended_rebuild_rejects_external_proxy_even_when_restore_needs_no_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = ServiceSnapshot {
+            web: Some(ProxyEndpoint { host: "127.0.0.1".into(), port: 7890 }),
+            ..ServiceSnapshot::default()
+        };
+        let backend = FakeBackend::new(&["Wi-Fi"]).with_preset("Wi-Fi", snapshot);
+        let manager = manager_with(backend.clone(), &dir);
+        manager.suspend_for_tun().unwrap();
+        let before = std::fs::read(manager.tun_journal_path()).unwrap();
+        backend.enable_service("Wi-Fi", 7890).unwrap();
+        assert!(manager.ensure_unattended_tun_restore().is_ok());
+        assert!(manager.ensure_unattended_tun_rebuild().unwrap_err().contains("手动"));
+        assert_eq!(std::fs::read(manager.tun_journal_path()).unwrap(), before);
+        assert!(backend.inner.enabled.lock().unwrap().contains("Wi-Fi"));
+        assert!(backend.inner.restored.lock().unwrap().is_empty());
+    }
+
     /// 授权等待期间开始退出，稍后成功的写入须回滚而不能报告已开启。
     #[test]
     fn shutdown_during_authorization_rolls_back_late_enable() {
@@ -1414,10 +1664,10 @@ mod tests {
         let enable = std::thread::spawn(move || enabling.enable_during_tun(7897));
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let cleaning = manager.clone();
-        let cleanup = std::thread::spawn(move || cleaning.clear_external_for_tun());
+        let cleanup = std::thread::spawn(move || cleaning.external_proxy_conflict_for_tun());
         release_tx.send(()).unwrap();
         enable.join().unwrap().unwrap();
-        cleanup.join().unwrap().unwrap();
+        assert!(!cleanup.join().unwrap());
         assert!(manager.status().enabled);
         assert!(backend.inner.enabled.lock().unwrap().contains("Wi-Fi"));
         assert!(dir.path().join("journal.json").exists());

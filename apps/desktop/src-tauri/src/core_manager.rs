@@ -145,7 +145,9 @@ impl Shared {
 
     fn notify(&self, status: CoreStatus) {
         self.inner.lock().unwrap().status = status.clone();
-        if let Some(cb) = self.callback.lock().unwrap().clone() {
+        // 回调可能等待 core_op；持注册锁调用会和退出线程的 stop/notify 互锁。
+        let callback = self.callback.lock().unwrap().clone();
+        if let Some(cb) = callback {
             cb(&status);
         }
     }
@@ -269,9 +271,7 @@ impl Shared {
             let pid = child.id();
             if !gone {
                 #[cfg(target_os = "macos")]
-                if !ROOT_KILL_PROMPT_DISABLED.load(std::sync::atomic::Ordering::SeqCst) {
-                    escalate_admin_kill(pid);
-                }
+                escalate_admin_kill(pid);
                 for _ in 0..40 {
                     match child.try_wait() {
                         Ok(Some(_)) => {
@@ -284,23 +284,7 @@ impl Shared {
                 }
             }
             if !gone {
-                #[cfg(target_os = "macos")]
-                if !ROOT_KILL_PROMPT_DISABLED.load(std::sync::atomic::Ordering::SeqCst) {
-                    escalate_admin_kill(pid);
-                }
-                for _ in 0..40 {
-                    match child.try_wait() {
-                        Ok(Some(_)) => {
-                            gone = true;
-                            break;
-                        }
-                        Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                        Err(_) => break,
-                    }
-                }
-                if !gone {
-                    eprintln!("core kill: pid {pid} survived SIGKILL (root?); giving up handle");
-                }
+                eprintln!("core kill: pid {pid} survived SIGKILL (root?); retaining identity for retry");
             }
             if gone {
                 let _ = child.wait();
@@ -728,7 +712,7 @@ impl CoreManager {
                 // SYSTEM 内核归服务管理，这里只探测置 Running（无子进程句柄
                 // 可监视；死亡可感知性由 #20 健康监测的控制器探测兜底）
                 let shared = self.shared.clone();
-                std::thread::spawn(move || {
+                crate::authorization::spawn_background(move || {
                     probe_external_core(shared, port, secret);
                 });
                 #[cfg(target_os = "linux")]
@@ -824,6 +808,56 @@ impl CoreManager {
     /// 轻量关窗与自动更新共用同一交接协议。
     pub fn detach(&self) -> Option<u32> {
         self.prepare_handoff().ok().flatten()
+    }
+
+    /// 退出失败时重新接管仍存活的内核，让用户可以继续使用或重试退出。
+    pub fn stop_for_exit(&self) -> bool {
+        let controller = self.controller();
+        if self.stop() {
+            return true;
+        }
+        self.resume_after_failed_stop(controller);
+        false
+    }
+
+    /// 只通过身份和已认证控制器确认存活，不再次发起停止或管理员授权。
+    fn resume_after_failed_stop(&self, controller: Option<(u16, String)>) {
+        let Some((port, secret)) = controller else {
+            return;
+        };
+        let (pid, binary) = {
+            let inner = self.shared.inner.lock().unwrap();
+            let Some(pid) = inner.external_pid else {
+                return;
+            };
+            let binary = inner
+                .external_binary
+                .clone()
+                .unwrap_or_else(|| self.shared.binary_path.clone());
+            (pid, binary)
+        };
+        let gone = || {
+            !pid_is_alive(pid) || process_matches_binary(pid, &binary) == Some(false)
+        };
+        let probe = ControllerProbe {
+            port,
+            secret: secret.clone(),
+        };
+        if !probe.wait_ready(Duration::from_secs(2), || false, gone) {
+            return;
+        }
+        {
+            let mut inner = self.shared.inner.lock().unwrap();
+            if inner.external_pid != Some(pid) {
+                return;
+            }
+            inner.controller = Some((port, secret));
+            inner.stopping = false;
+            inner.detached = false;
+        }
+        self.shared.notify(CoreStatus::Running);
+        #[cfg(any(unix, windows))]
+        watch_external(self.shared.clone(), pid, binary);
     }
 
     /// 优雅停止：标记后杀进程，watch 线程随之退出。
@@ -939,7 +973,7 @@ fn spawn_and_watch(shared: Arc<Shared>) {
         shared.notify(CoreStatus::Crashed("controller state missing".into()));
         return;
     };
-    std::thread::spawn(move || watch(shared, port, secret));
+    crate::authorization::spawn_background(move || watch(shared, port, secret));
 }
 
 /// 活性探测：进程是否存在（kill 0）。
@@ -952,12 +986,6 @@ fn kill_pid_probe(pid: u32) -> bool {
 fn kill_pid_probe(_pid: u32) -> bool {
     false
 }
-
-/// root 内核补杀的授权弹窗门控：应用退出路径置 true（退出时不该突然弹
-/// 管理员框），用户主动的 TUN/引擎/配置切换保持允许——这些本就是会弹
-/// 授权框的语义场景。拒绝授权时停止流程照常继续（预绑定检查兜底报错）。
-pub static ROOT_KILL_PROMPT_DISABLED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// 杀掉不属于本进程的内核 pid（收养场景）。unix 用 SIGKILL，其余平台降级。
 fn kill_pid(pid: u32) {
@@ -1021,6 +1049,7 @@ fn privileged_shell_script(command: &str) -> String {
 /// 请管理员授权补杀。仅在确有 root 内核残留时才会弹授权框。
 #[cfg(target_os = "macos")]
 fn escalate_admin_kill(pid: u32) {
+    if crate::authorization::require_interactive().is_err() { return; }
     let script = format!("kill -9 {pid}");
     let out = crate::process::command("osascript")
         .args(["-e", &privileged_shell_script(&script)])
@@ -1069,9 +1098,7 @@ fn kill_external_checked(pid: u32, expected: Option<&Path>, work_dir: Option<&Pa
         std::thread::sleep(Duration::from_millis(50));
     }
     // 2 秒仍存活：root 内核，SIGKILL 对普通用户 EPERM——授权补杀
-    if !ROOT_KILL_PROMPT_DISABLED.load(std::sync::atomic::Ordering::SeqCst) {
-        escalate_admin_kill(pid);
-    }
+    escalate_admin_kill(pid);
     for _ in 0..40 {
         if gone() {
             return true;
@@ -1291,6 +1318,7 @@ fn windows_port_listeners(_port: u16) -> Vec<(u32, String)> {
 /// 监听者，且仅当其命令行含内核特征时才杀。返回是否清理成功。
 #[cfg(target_os = "macos")]
 fn escalate_clear_port(port: u16) -> bool {
+    if crate::authorization::require_interactive().is_err() { return false; }
     // 脚本刻意不含双引号与反斜杠，免去 AppleScript 字符串转义；
     // 仅当监听者命令行含内核特征时才杀，避免误伤其他程序。
     let shell = format!(
@@ -1458,7 +1486,7 @@ impl Shared {
 /// 不把权限不足当作退出；Windows 使用原生进程存活查询。
 #[cfg(any(unix, windows))]
 fn watch_external(shared: Arc<Shared>, pid: u32, binary: PathBuf) {
-    std::thread::spawn(move || loop {
+    crate::authorization::spawn_background(move || loop {
         std::thread::sleep(Duration::from_secs(3));
         {
             let inner = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1489,7 +1517,7 @@ fn watch_external(shared: Arc<Shared>, pid: u32, binary: PathBuf) {
 /// A live service connection confirms both core lifetime and owned resources.
 #[cfg(target_os = "linux")]
 fn watch_linux_service(shared: Arc<Shared>, pid: u32) {
-    std::thread::spawn(move || loop {
+    crate::authorization::spawn_background(move || loop {
         std::thread::sleep(Duration::from_secs(1));
         {
             let inner = shared.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -1933,6 +1961,23 @@ pub fn free_port() -> Option<u16> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// 状态回调不可占着回调注册锁，退出和崩溃恢复可能同时通知。
+    #[test]
+    fn callback_runs_without_holding_registration_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let manager = super::CoreManager::new(std::path::PathBuf::from("unused-core"), dir.path().into());
+        let shared = manager.shared.clone();
+        let weak = std::sync::Arc::downgrade(&shared);
+        let unlocked = std::sync::Arc::new(AtomicBool::new(false));
+        let observed = unlocked.clone();
+        manager.set_callback(std::sync::Arc::new(move |_| {
+            observed.store(weak.upgrade().unwrap().callback.try_lock().is_ok(), Ordering::SeqCst);
+        }));
+        shared.notify(super::CoreStatus::Stopped);
+        shared.callback.lock().unwrap().take();
+        assert!(unlocked.load(Ordering::SeqCst));
+    }
     use super::*;
 
     #[test]
@@ -2542,6 +2587,45 @@ pub(crate) mod tests {
         assert!(replacement.stop());
         let _ = reaper.join().unwrap();
         assert!(!Shared::descriptor_path(dir.path()).exists());
+    }
+
+    /// 停止授权取消后恢复控制连接，且恢复过程不再次发送停止请求。
+    #[cfg(unix)]
+    #[test]
+    fn failed_exit_stop_resumes_authenticated_core_without_another_kill() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut buffer = [0; 2048];
+            let size = stream.read(&mut buffer).unwrap();
+            assert!(String::from_utf8_lossy(&buffer[..size])
+                .to_lowercase().contains("authorization: bearer test-secret"));
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+        });
+        let manager = CoreManager::new(PathBuf::from("/bin/sleep"), dir.path().to_path_buf());
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let reaper = std::thread::spawn(move || child.wait());
+        // 模拟停止授权被取消后留下的状态，恢复只能探测，不能再次杀进程。
+        {
+            let mut inner = manager.shared.inner.lock().unwrap();
+            inner.external_pid = Some(pid);
+            inner.external_binary = Some(PathBuf::from("/bin/sleep"));
+            inner.stopping = true;
+            inner.status = CoreStatus::Crashed("cancelled".into());
+        }
+        manager.resume_after_failed_stop(Some((port, "test-secret".into())));
+        server.join().unwrap();
+        assert_eq!(manager.controller(), Some((port, "test-secret".into())));
+        assert_eq!(manager.status(), CoreStatus::Running);
+        assert!(!manager.shared.inner.lock().unwrap().stopping);
+        assert!(pid_is_alive(pid));
+        assert!(manager.stop());
+        reaper.join().unwrap().unwrap();
     }
 
     #[cfg(unix)]
