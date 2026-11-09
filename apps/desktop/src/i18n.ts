@@ -931,6 +931,21 @@ const dict: Record<Lang, Record<string, string>> = {
       "TUN failed repeated health checks and was turned off. Check your network or proxy node.",
     "toast.tunAutoDisableFailed":
       "TUN failed repeated health checks but could not be turned off. Check your network settings.",
+    "diag.hint": "Step-by-step self check in dependency order; failed items offer actionable fixes.",
+    "home.noProfiles": "No profiles yet — import your first subscription on the Config page.",
+    "logs.stopped": "Core is not running. Enable the system proxy or start the core first.",
+    "proxies.noCoreHint": "Import a subscription and start the proxy on the Config page first.",
+    "settings.autoDownloadHint": "Automatically download new versions in the background when found; you will be prompted to restart and install.",
+    "settings.lanHint": "Other devices on the same network can use this proxy (bind 0.0.0.0).",
+    "settings.logsRetentionHint": "Log files older than the retention period are deleted automatically.",
+    "settings.logsSaveHint": "Written daily to data/logs/ (info and above); kept across restarts.",
+    "settings.portHint": "HTTP + SOCKS5 shared; changing it hot-restarts a running core.",
+    "settings.tunNeedAuth": "Not authorized · admin authorization is needed next time TUN is enabled",
+    "settings.tunStateHint": "Authorize once — no re-authorization until the core is upgraded.",
+    "settings.updateTimeout": "Check timed out. Check your network and retry.",
+    "sites.stopped": "Core is not running. Enable the system proxy or start the core on the home page first.",
+    "studio.configHint": "Manage subscriptions, local configs and auto-update.",
+    "studio.independent": "Both takeover modes can be enabled together or toggled separately.",
   },
 };
 
