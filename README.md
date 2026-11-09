@@ -7,7 +7,7 @@ Rust, supporting the mihomo and sing-box dual cores. It puts subscriptions, node
 system proxy, TUN, connections and logs in a single interface, with live up/down speeds in the
 tray / menu bar.
 
-<img width="1029" height="719" alt="image" src="https://github.com/user-attachments/assets/88879463-6eb9-47a6-90e2-81ea7cea58b8" />
+<img width="1120" height="720" alt="image" src="https://github.com/user-attachments/assets/29a26e8a-b8ce-425b-9f17-9a228d83d211" />
 
 **Current version:** [v0.13.9](https://github.com/Richard-Zhang1019/Crossbow/releases/tag/v0.13.9).
 Available as a macOS Apple Silicon DMG, a Windows x64 installer, and an experimental Linux
