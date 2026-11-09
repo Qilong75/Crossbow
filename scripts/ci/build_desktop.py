@@ -4,6 +4,7 @@ from collections import deque
 import os
 import re
 import subprocess
+import sys
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -11,6 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main():
     """仅重试安装器下载的临时 HTTP 错误，编译错误和最终失败原样返回。"""
+    # Windows 重定向输出默认使用 cp1252，无法打印构建工具的勾号或中文。
+    sys.stdout.reconfigure(encoding='utf-8')
     command = ['pnpm.cmd' if os.name == 'nt' else 'pnpm',
                'tauri', 'build', '--config', 'tauri.ci.conf.json']
     for attempt in range(1, 4):

@@ -41,6 +41,17 @@ class BuildDownloadsTests(unittest.TestCase):
         self.assertEqual(spawn.call_count, 1)
         sleep.assert_not_called()
 
+    def test_windows_output_can_print_unicode_build_progress(self):
+        """用 Windows 默认控制台编码重现并验证 Unicode 日志输出。"""
+        output = io.BytesIO()
+        console = io.TextIOWrapper(output, encoding='cp1252', write_through=True)
+        with patch('sys.stdout', console), \
+             patch.object(build_desktop.subprocess, 'Popen', return_value=
+                          self.process('✓ built\n构建成功\n', 0)):
+            self.assertEqual(build_desktop.main(), 0)
+        console.flush()
+        self.assertEqual(output.getvalue().decode('utf-8'), '✓ built\n构建成功\n')
+
     def test_repeated_download_failure_stays_failed(self):
         processes = [self.process('failed to bundle project: http status: 504\n', 1)
                      for _ in range(3)]
