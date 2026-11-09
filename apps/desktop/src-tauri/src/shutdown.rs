@@ -52,8 +52,9 @@ impl ExitState {
         if result.is_ok() {
             release_session();
         }
-        self.0
-            .store(if result.is_ok() { READY } else { IDLE }, Ordering::SeqCst);
+        if result.is_ok() {
+            self.0.store(READY, Ordering::SeqCst);
+        }
         result
     }
 }
@@ -83,6 +84,8 @@ mod tests {
             .is_err());
         assert!(std::net::TcpStream::connect(address).is_ok());
         assert!(!exit.ready());
+        assert!(!exit.begin(), "错误结果交付完成前不能开始另一轮退出");
+        exit.cancel();
         assert!(exit.ensure_open().is_ok());
         assert!(exit.begin());
         exit.finish(

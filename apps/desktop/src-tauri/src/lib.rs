@@ -18,6 +18,8 @@ use tauri_plugin_deep_link::DeepLinkExt as _;
 
 #[cfg(target_os = "macos")]
 mod macos_icon;
+#[cfg(target_os = "macos")]
+mod macos_shutdown;
 mod authorization;
 mod coexist;
 mod config_transition;
@@ -3485,7 +3487,11 @@ pub(crate) fn prepare_update_restart(app: &AppHandle) -> Result<(), String> {
     state
         .update_handoff
         .store(handed_off, std::sync::atomic::Ordering::SeqCst);
-    cleanup_before_process_exit(app, true)
+    let result = cleanup_before_process_exit(app, true);
+    if result.is_err() {
+        state.exit.cancel();
+    }
+    result
 }
 
 /// 第一阶段阻止退出，后台完成恢复；失败时回到可重试状态并展示统一通知。
@@ -3497,13 +3503,32 @@ fn request_process_exit(app: &AppHandle, code: Option<i32>) {
         return;
     }
     let handle = app.clone();
-    std::thread::spawn(move || match cleanup_before_process_exit(&handle, false) {
-        Ok(()) => handle.exit(code.unwrap_or(0)),
+    std::thread::spawn(move || {
+        let result = cleanup_before_process_exit(&handle, false);
+        let callback_handle = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            finish_process_exit(&callback_handle, code, result);
+        }) {
+            eprintln!("交付退出准备结果失败：{error}");
+        }
+    });
+}
+
+/// 主线程交付结果后才重新开放退出，避免旧失败结果取消新一轮原生请求。
+fn finish_process_exit(handle: &AppHandle, code: Option<i32>, result: Result<(), String>) {
+    match result {
+        Ok(()) => {
+            #[cfg(target_os = "macos")]
+            if macos_shutdown::complete(true) {
+                return;
+            }
+            handle.exit(code.unwrap_or(0));
+        }
         Err(error) => {
             let state = handle.state::<AppState>();
             let _ = handle.emit("sysproxy://status", state.sysproxy.status());
-            refresh_tray(&handle);
-            show_main_window(&handle);
+            refresh_tray(handle);
+            show_main_window(handle);
             let mut notice = notifications::Notice::new(
                 notifications::Kind::Error,
                 "app.exitBlocked",
@@ -3511,9 +3536,12 @@ fn request_process_exit(app: &AppHandle, code: Option<i32>) {
             );
             notice.details = error;
             notice.actions = vec![notifications::Action::Diagnostics];
-            notifications::publish(&handle, notice);
+            notifications::publish(handle, notice);
+            #[cfg(target_os = "macos")]
+            macos_shutdown::complete(false);
+            state.exit.cancel();
         }
-    });
+    }
 }
 
 /// 系统代理总开关（托盘与首页共用）。
@@ -3983,6 +4011,9 @@ pub fn run() {
             update_check::spawn_checker(app.handle());
             #[cfg(target_os = "macos")]
             refresh_tray_nodes(app.handle(), false);
+
+            #[cfg(target_os = "macos")]
+            macos_shutdown::install(app.handle())?;
 
             Ok(())
         })
