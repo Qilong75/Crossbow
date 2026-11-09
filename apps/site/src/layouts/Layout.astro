@@ -171,8 +171,8 @@ const nav = [
         const value = (e.target as HTMLInputElement).value;
         try { localStorage.setItem(LANGUAGE_KEY, value === "en" ? "en" : "zh-CN"); } catch {}
         // trailingSlash: never —— /en 不带尾斜杠；根路径两种语言都是 "/"
-        const rest = location.pathname.replace(/^\/en/, "").replace(/\/+$/, "");
-        const target = value === "en" ? "/en" + rest : rest || "/";
+        const rest = location.pathname.replace(/^\/zh/, "").replace(/\/+$/, "");
+        const target = value === "zh" ? "/zh" + rest : rest || "/";
         location.href = new URL(target, location.origin).href;
       });
 

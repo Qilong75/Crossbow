@@ -161,7 +161,7 @@ const GROUPS: { label: string; ids: string[] }[] = [
 const byId = Object.fromEntries(FEATURES.map((f) => [f.id, f]));
 const groupLabel = (id: string) => GROUPS.find((g) => g.ids.includes(id))?.label ?? "";
 
-const path = (id: string) => `${import.meta.env.BASE_URL.replace(/\/+$/, "")}${lang === "en" ? "/en" : ""}/features#${id}`;
+const path = (id: string) => `${import.meta.env.BASE_URL.replace(/\/+$/, "")}${lang === "zh" ? "/zh" : ""}/features#${id}`;
 ---
 
 <div class="shell detail-page">
@@ -208,7 +208,7 @@ const path = (id: string) => `${import.meta.env.BASE_URL.replace(/\/+$/, "")}${l
                 <tr><th scope="row">{_("当前状态")}</th><td>{_("正式支持")}</td><td>{_("正式支持")}</td><td>{_("社区实验")}</td><td>{_("开发验证中")}</td></tr>
               </tbody>
             </table>
-            <p class="matrix-note">{_("更新内容以各平台发布说明为准；Linux 的验收边界与安装步骤见")}<a class="text-link" href={`${import.meta.env.BASE_URL.replace(/\/+$/, "")}${lang === "en" ? "/en" : ""}/guide#linux`}>{_("Linux 支持范围")}</a>{_("。")}</p>
+            <p class="matrix-note">{_("更新内容以各平台发布说明为准；Linux 的验收边界与安装步骤见")}<a class="text-link" href={`${import.meta.env.BASE_URL.replace(/\/+$/, "")}${lang === "zh" ? "/zh" : ""}/guide#linux`}>{_("Linux 支持范围")}</a>{_("。")}</p>
           </div>
         ) : (
           <ul>{f.detail.map((d) => <li>{d}</li>)}</ul>
@@ -219,7 +219,7 @@ const path = (id: string) => `${import.meta.env.BASE_URL.replace(/\/+$/, "")}${l
   </div>
   <div class="page-next">
     <div><h2>{_("还有更多进阶玩法")}</h2><p>{_("JS 覆写、双引擎切换、深链接导入，继续探索。")}</p></div>
-    <a class="text-link" href={`${import.meta.env.BASE_URL.replace(/\/+$/, "")}${lang === "en" ? "/en" : ""}/guide`}>{_("查看进阶指南 →")}</a>
+    <a class="text-link" href={`${import.meta.env.BASE_URL.replace(/\/+$/, "")}${lang === "zh" ? "/zh" : ""}/guide`}>{_("查看进阶指南 →")}</a>
   </div>
   <div class="page-meta">
     <a href={`${REPO}/issues`} target="_blank" rel="noopener noreferrer">{_("功能建议欢迎提 Issue ↗")}</a>

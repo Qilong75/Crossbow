@@ -11,10 +11,10 @@ export function t(lang: Lang, key: string): string {
   return key;
 }
 
-/** 同一页面的另一语言路径；中文在根路径，英文在 /en/*。 */
+/** 同一页面的另一语言路径；英文在根路径，中文在 /zh/*。 */
 export function pathFor(lang: Lang, path: string): string {
-  // trailingSlash: never —— 一律不带尾斜杠（/en、/features）
-  if (lang === "en") return path === "/" ? "/en" : `/en${path}`;
+  // trailingSlash: never —— 一律不带尾斜杠（/zh、/zh/features）
+  if (lang === "zh") return path === "/" ? "/zh" : `/zh${path}`;
   return path;
 }
 
